@@ -121,19 +121,30 @@ import os
 import json
 
 class NERELDataset(torch.utils.data.Dataset):
-    def __init__(self, data_dir, tokenizer, max_length=512):
+    def __init__(self, data_dir, tokenizer, max_length=512, show_examples=True):
         self.data_dir = data_dir
         self.tokenizer = tokenizer
         self.max_length = max_length
+        self.show_examples = show_examples
         self.samples = self._load_samples()
-
+        
         print(f"Loaded {len(self.samples)} samples")
         print(f"Relations count: {sum(len(s['relations']) for s in self.samples)}")
-        print(f"Example with relations:")
-        for sample in self.samples:
-            if sample['relations']:
-                print(sample)
-                break
+        
+        if self.show_examples:
+            print("\nПримеры с отношениями (первые 10):")
+            shown = 0
+            for i, sample in enumerate(self.samples):
+                if sample['relations'] and shown < 10:
+                    print(f"\nПример {i+1}:")
+                    print(f"Текст: {sample['text']}")
+                    print("Сущности:")
+                    for entity in sample['entities']:
+                        print(f"  {entity['type']}: {entity['text']} ({entity['start']}-{entity['end']})")
+                    print("Отношения:")
+                    for rel in sample['relations']:
+                        print(f"  {rel['type']}: {rel['arg1']} -> {rel['arg2']}")
+                    shown += 1
 
     def _load_samples(self):
         samples = []
@@ -273,7 +284,14 @@ class NERELDataset(torch.utils.data.Dataset):
                 if arg1_idx != -1 and arg2_idx != -1 and arg1_idx < len(token_entities) and arg2_idx < len(token_entities):
                     rel_data['pairs'].append((arg1_idx, arg2_idx))
                     rel_data['labels'].append(0 if relation['type'] == 'WORKS_AS' else 1)
-
+                    
+        if idx < 10 and self.show_examples:
+            print(f"\n=== Пример {idx+1} ===")
+            print("Токены и их индексы:")
+            for i, (token_id, offset) in enumerate(zip(encoding['input_ids'], encoding['offset_mapping'])):
+                token = self.tokenizer.decode([token_id])
+                print(f"{i}: {token} (id: {token_id}, offset: {offset[0]}-{offset[1]})")
+                
         return {
             'input_ids': torch.tensor(encoding['input_ids']),
             'attention_mask': torch.tensor(encoding['attention_mask']),
