@@ -1,5 +1,5 @@
 # 1. Клонируем репозиторий (если еще не сделали)
-git clone https://github.com/nerel-ds/NEREL.git
+# !git clone https://github.com/nerel-ds/NEREL.git
 
 import torch
 import torch.nn as nn
