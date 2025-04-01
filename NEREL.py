@@ -135,7 +135,7 @@ class NERELDataset(torch.utils.data.Dataset):
             print("\nПримеры с отношениями (первые 10):")
             shown = 0
             for i, sample in enumerate(self.samples):
-                if sample['relations'] and shown < 10:
+                if sample['relations'] and shown < 1:
                     print(f"\nПример {i+1}:")
                     print(f"Текст: {sample['text']}")
                     print("Сущности:")
