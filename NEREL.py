@@ -157,6 +157,7 @@ class NERELDataset(torch.utils.data.Dataset):
                 'entities': entities,
                 'relations': relations
             })
+        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         print(f"Found {len(txt_files)} .txt files in {self.data_dir}")
         print(f"Loaded {len(samples)} samples")
         if samples:
@@ -166,73 +167,42 @@ class NERELDataset(torch.utils.data.Dataset):
     def _parse_ann_file(self, ann_path):
         entities = []
         relations = []
-        
+
         with open(ann_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith('T'):  # Сущности
-                    parts = line.split('\t')
-                    if len(parts) >= 3:
-                        entity_info = parts[1].split()
-                        if len(entity_info) >= 3:
-                            entities.append({
-                                'id': parts[0],
-                                'type': entity_info[0],
-                                'start': int(entity_info[1]),
-                                'end': int(entity_info[2]),
-                                'text': parts[2]
-                            })
-                elif line.startswith('R'):  # Отношения
-                    parts = line.split('\t')
-                    if len(parts) >= 2:
-                        rel_info = parts[1].split()
-                        if len(rel_info) >= 3:
-                            relations.append({
-                                'type': rel_info[0],
-                                'arg1': rel_info[1].split(':')[1],
-                                'arg2': rel_info[2].split(':')[1]
-                            })
-        
-        return entities, relations  # Теперь точно возвращаем два значения
-    # def _parse_ann_file(self, ann_path):
-    #     entities = []
-    #     relations = []
+            lines = f.readlines()
 
-    #     with open(ann_path, 'r', encoding='utf-8') as f:
-    #         lines = f.readlines()
+        for line in lines:
+            if line.startswith('T'):
+                parts = line.strip().split('\t')
+                entity_id = parts[0]
+                type_and_span = parts[1].split()
+                entity_type = type_and_span[0]
+                start, end = int(type_and_span[1]), int(type_and_span[-1])
+                text = parts[2]
 
-    #     for line in lines:
-    #         if line.startswith('T'):
-    #             parts = line.strip().split('\t')
-    #             entity_id = parts[0]
-    #             type_and_span = parts[1].split()
-    #             entity_type = type_and_span[0]
-    #             start, end = int(type_and_span[1]), int(type_and_span[-1])
-    #             text = parts[2]
+                if entity_type in ['PERSON', 'PROFESSION']:
+                    entities.append({
+                        'id': entity_id,
+                        'type': entity_type,
+                        'start': start,
+                        'end': end,
+                        'text': text
+                    })
 
-    #             if entity_type in ['PERSON', 'PROFESSION']:
-    #                 entities.append({
-    #                     'id': entity_id,
-    #                     'type': entity_type,
-    #                     'start': start,
-    #                     'end': end,
-    #                     'text': text
-    #                 })
+            elif line.startswith('R'):
+                parts = line.strip().split('\t')
+                rel_type = parts[1].split()[0]
+                arg1 = parts[1].split()[1].split(':')[1]
+                arg2 = parts[1].split()[2].split(':')[1]
 
-    #         elif line.startswith('R'):
-    #             parts = line.strip().split('\t')
-    #             rel_type = parts[1].split()[0]
-    #             arg1 = parts[1].split()[1].split(':')[1]
-    #             arg2 = parts[1].split()[2].split(':')[1]
+                if rel_type in ['WORKS_AS', 'WORKPLACE']:
+                    relations.append({
+                        'type': rel_type,
+                        'arg1': arg1,
+                        'arg2': arg2
+                    })
 
-    #             if rel_type in ['WORKS_AS', 'WORKPLACE']:
-    #                 relations.append({
-    #                     'type': rel_type,
-    #                     'arg1': arg1,
-    #                     'arg2': arg2
-    #                 })
-
-    #     return entities, relations
+        return entities, relations
 
     def __len__(self):
         return len(self.samples)
