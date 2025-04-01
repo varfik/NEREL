@@ -157,23 +157,43 @@ class NERELDataset(torch.utils.data.Dataset):
                 'entities': entities,
                 'relations': relations
             })
+        print(f"Found {len(txt_files)} .txt files in {self.data_dir}")
+        print(f"Loaded {len(samples)} samples")
+        if samples:
+            print(f"First sample relations: {samples[0]['relations']}")
         return samples
 
     def _parse_ann_file(self, ann_path):
+        entities = []
         relations = []
+        
         with open(ann_path, 'r', encoding='utf-8') as f:
             for line in f:
-                if line.startswith('R'):
-                    parts = line.strip().split()
-                    rel_type = parts[1]
-                    arg1 = parts[2].split(':')[1]
-                    arg2 = parts[3].split(':')[1]
-                    relations.append({
-                        'type': rel_type,
-                        'arg1': arg1,
-                        'arg2': arg2
-                    })
-        return relations
+                line = line.strip()
+                if line.startswith('T'):  # Сущности
+                    parts = line.split('\t')
+                    if len(parts) >= 3:
+                        entity_info = parts[1].split()
+                        if len(entity_info) >= 3:
+                            entities.append({
+                                'id': parts[0],
+                                'type': entity_info[0],
+                                'start': int(entity_info[1]),
+                                'end': int(entity_info[2]),
+                                'text': parts[2]
+                            })
+                elif line.startswith('R'):  # Отношения
+                    parts = line.split('\t')
+                    if len(parts) >= 2:
+                        rel_info = parts[1].split()
+                        if len(rel_info) >= 3:
+                            relations.append({
+                                'type': rel_info[0],
+                                'arg1': rel_info[1].split(':')[1],
+                                'arg2': rel_info[2].split(':')[1]
+                            })
+        
+        return entities, relations  # Теперь точно возвращаем два значения
     # def _parse_ann_file(self, ann_path):
     #     entities = []
     #     relations = []
