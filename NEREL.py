@@ -160,44 +160,59 @@ class NERELDataset(torch.utils.data.Dataset):
         return samples
 
     def _parse_ann_file(self, ann_path):
-        entities = []
         relations = []
-
         with open(ann_path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-
-        for line in lines:
-            if line.startswith('T'):
-                parts = line.strip().split('\t')
-                entity_id = parts[0]
-                type_and_span = parts[1].split()
-                entity_type = type_and_span[0]
-                start, end = int(type_and_span[1]), int(type_and_span[-1])
-                text = parts[2]
-
-                if entity_type in ['PERSON', 'PROFESSION']:
-                    entities.append({
-                        'id': entity_id,
-                        'type': entity_type,
-                        'start': start,
-                        'end': end,
-                        'text': text
-                    })
-
-            elif line.startswith('R'):
-                parts = line.strip().split('\t')
-                rel_type = parts[1].split()[0]
-                arg1 = parts[1].split()[1].split(':')[1]
-                arg2 = parts[1].split()[2].split(':')[1]
-
-                if rel_type in ['WORKS_AS', 'WORKPLACE']:
+            for line in f:
+                if line.startswith('R'):
+                    parts = line.strip().split()
+                    rel_type = parts[1]
+                    arg1 = parts[2].split(':')[1]
+                    arg2 = parts[3].split(':')[1]
                     relations.append({
                         'type': rel_type,
                         'arg1': arg1,
                         'arg2': arg2
                     })
+        return relations
+    # def _parse_ann_file(self, ann_path):
+    #     entities = []
+    #     relations = []
 
-        return entities, relations
+    #     with open(ann_path, 'r', encoding='utf-8') as f:
+    #         lines = f.readlines()
+
+    #     for line in lines:
+    #         if line.startswith('T'):
+    #             parts = line.strip().split('\t')
+    #             entity_id = parts[0]
+    #             type_and_span = parts[1].split()
+    #             entity_type = type_and_span[0]
+    #             start, end = int(type_and_span[1]), int(type_and_span[-1])
+    #             text = parts[2]
+
+    #             if entity_type in ['PERSON', 'PROFESSION']:
+    #                 entities.append({
+    #                     'id': entity_id,
+    #                     'type': entity_type,
+    #                     'start': start,
+    #                     'end': end,
+    #                     'text': text
+    #                 })
+
+    #         elif line.startswith('R'):
+    #             parts = line.strip().split('\t')
+    #             rel_type = parts[1].split()[0]
+    #             arg1 = parts[1].split()[1].split(':')[1]
+    #             arg2 = parts[1].split()[2].split(':')[1]
+
+    #             if rel_type in ['WORKS_AS', 'WORKPLACE']:
+    #                 relations.append({
+    #                     'type': rel_type,
+    #                     'arg1': arg1,
+    #                     'arg2': arg2
+    #                 })
+
+    #     return entities, relations
 
     def __len__(self):
         return len(self.samples)
