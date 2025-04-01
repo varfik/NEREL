@@ -416,13 +416,16 @@ def train_model():
     return model, tokenizer
             
 
-def extract_relations(text, model, tokenizer, device="cpu"):
-    # Tokenize input
-    encoding = tokenizer(text, return_tensors="pt", return_offsets_mapping=True)
+def extract_relations(text, model, tokenizer, device="cuda"):
+    # Убедимся, что модель на правильном устройстве
+    model.to(device)
+    
+    # Токенизация с переносом на устройство
+    encoding = tokenizer(text, return_tensors="pt")
     input_ids = encoding["input_ids"].to(device)
     attention_mask = encoding["attention_mask"].to(device)
-
-    # Get predictions
+    
+    # Предсказание
     with torch.no_grad():
         outputs = model(input_ids, attention_mask)
 
