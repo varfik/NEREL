@@ -320,7 +320,7 @@ def train_model():
             'ner_labels': ner_labels,
             'rel_data': rel_data  # Это будет список словарей
         }
-    train_dataset = NERELDataset("/content/NEREL/NEREL-v1.1/train", tokenizer)
+    train_dataset = NERELDataset("/NEREL/NEREL-v1.1/train", tokenizer)
     train_loader = DataLoader(train_dataset, batch_size=4, collate_fn=collate_fn, shuffle=True)
 
     optimizer = AdamW(model.parameters(), lr=5e-5)
