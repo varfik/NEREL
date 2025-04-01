@@ -331,7 +331,15 @@ def train_model():
             'ner_labels': ner_labels,
             'rel_data': rel_data  # Это будет список словарей
         }
+
     train_dataset = NERELDataset("NEREL/NEREL-v1.1/train", tokenizer)
+    has_relations = any(len(sample['relations']) > 0 for sample in train_dataset.samples)
+    if not has_relations:
+        print("ОШИБКА: В обучающих данных нет отношений!")
+        print("Проверьте:")
+        print("1. Путь к данным (должен быть /NEREL/NEREL-v1.1/train)")
+        print("2. Содержимое .ann файлов (должны быть строки с 'R')")
+        print("3. Фильтрацию отношений в _parse_ann_file()")
     train_loader = DataLoader(train_dataset, batch_size=4, collate_fn=collate_fn, shuffle=True)
 
     optimizer = AdamW(model.parameters(), lr=5e-5)
@@ -417,11 +425,10 @@ def train_model():
             
 
 def extract_relations(text, model, tokenizer, device="cuda"):
-    # Убедимся, что модель на правильном устройстве
-    model.to(device)
+    # Добавляем пробелы перед знаками препинания для лучшей токенизации
+    text = text.replace(',', ' , ').replace('.', ' . ')
     
-    # Токенизация с переносом на устройство
-    encoding = tokenizer(text, return_tensors="pt")
+    encoding = tokenizer(text, return_tensors="pt", return_offsets_mapping=True)
     input_ids = encoding["input_ids"].to(device)
     attention_mask = encoding["attention_mask"].to(device)
     
@@ -432,33 +439,37 @@ def extract_relations(text, model, tokenizer, device="cuda"):
     # Decode NER predictions
     ner_preds = torch.argmax(outputs['ner_logits'], dim=-1)[0].cpu().numpy()
 
-    # Extract entities
     entities = []
     current_entity = None
-
+    
     for i, (token_id, pred) in enumerate(zip(input_ids[0], ner_preds)):
-        if pred != 0:  # Not O
-            token = tokenizer.decode([token_id])
-            if pred == 1:  # PERSON
-                entity_type = "PERSON"
-            else:  # PROFESSION
-                entity_type = "PROFESSION"
-
-            if current_entity is None or current_entity['type'] != entity_type:
-                if current_entity is not None:
+        token = tokenizer.decode([token_id])
+        
+        # Пропускаем спецтокены
+        if token in ['[CLS]', '[SEP]', '[PAD]']:
+            continue
+            
+        if pred != 0:  # Не O
+            entity_type = "PERSON" if pred == 1 else "PROFESSION"
+            
+            # Объединяем подтокены
+            if current_entity and current_entity['type'] == entity_type:
+                current_entity['end'] = i
+                current_entity['text'] += token.replace('##', '')
+            else:
+                if current_entity:
                     entities.append(current_entity)
                 current_entity = {
                     'type': entity_type,
                     'start': i,
                     'end': i,
-                    'text': token
+                    'text': token.replace('##', '')
                 }
-            else:
-                current_entity['end'] = i
-                current_entity['text'] += token
 
-    if current_entity is not None:
+    # Добавляем последнюю сущность
+    if current_entity:
         entities.append(current_entity)
+
 
     # Extract relations if there are at least 2 entities
     relations = []
@@ -492,6 +503,18 @@ def extract_relations(text, model, tokenizer, device="cuda"):
                     'arg2': entities[e2_idx]
                 })
 
+    # relations = []
+    # persons = [e for e in entities if e['type'] == 'PERSON']
+    # professions = [e for e in entities if e['type'] == 'PROFESSION']
+    
+    # # Простое правило: если есть PERSON и PROFESSION, связываем их
+    # if persons and professions:
+    #     relations.append({
+    #         'type': 'WORKS_AS',
+    #         'arg1': persons[0],
+    #         'arg2': professions[0]
+    #     })
+    
     return {
         'text': text,
         'entities': entities,
