@@ -508,17 +508,17 @@ def extract_relations(text, model, tokenizer, device="cuda"):
                     'arg2': entities[e2_idx]
                 })
 
-    # relations = []
-    # persons = [e for e in entities if e['type'] == 'PERSON']
-    # professions = [e for e in entities if e['type'] == 'PROFESSION']
+
+    persons = [e for e in entities if e['type'] == 'PERSON']
+    professions = [e for e in entities if e['type'] == 'PROFESSION']
     
-    # # Простое правило: если есть PERSON и PROFESSION, связываем их
-    # if persons and professions:
-    #     relations.append({
-    #         'type': 'WORKS_AS',
-    #         'arg1': persons[0],
-    #         'arg2': professions[0]
-    #     })
+    # Простое правило: если есть PERSON и PROFESSION, связываем их
+    if persons and professions:
+        relations.append({
+            'type': 'WORKS_AS',
+            'arg1': persons[0],
+            'arg2': professions[0]
+        })
     
     return {
         'text': text,
