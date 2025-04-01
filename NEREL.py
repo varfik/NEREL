@@ -127,6 +127,14 @@ class NERELDataset(torch.utils.data.Dataset):
         self.max_length = max_length
         self.samples = self._load_samples()
 
+        print(f"Loaded {len(self.samples)} samples")
+        print(f"Relations count: {sum(len(s['relations']) for s in self.samples)}")
+        print(f"Example with relations:")
+        for sample in self.samples:
+            if sample['relations']:
+                print(sample)
+                break
+
     def _load_samples(self):
         samples = []
         # Собираем все .txt файлы в папке
@@ -279,9 +287,12 @@ from torch.nn.utils.rnn import pad_sequence
 
 def train_model():
     tokenizer = AutoTokenizer.from_pretrained("DeepPavlov/rubert-base-cased")
-    model = NERRelationModel(num_ner_labels=3, num_rel_labels=3)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
+    print(f"Using device: {device}")
+    
+    # Перенос модели на устройство
+    model = NERRelationModel(num_ner_labels=3, num_rel_labels=3).to(device)
+
     def collate_fn(batch):
         # Получаем максимальную длину в батче
         max_len = max(len(item['input_ids']) for item in batch)
@@ -325,7 +336,7 @@ def train_model():
 
     optimizer = AdamW(model.parameters(), lr=5e-5)
 
-    for epoch in range(5):
+    for epoch in range(1):
         model.train()
         epoch_loss = 0
         ner_correct = 0
