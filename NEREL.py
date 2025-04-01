@@ -332,9 +332,9 @@ def train_model():
         ner_total = 0
         rel_correct = 0
         rel_total = 0
-
+        
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}")
-
+        
         for batch in progress_bar:
             optimizer.zero_grad()
 
@@ -359,41 +359,51 @@ def train_model():
                 ner_correct += ((ner_preds == inputs['ner_labels']) & active_mask).sum().item()
                 ner_total += active_mask.sum().item()
 
-            # Расчет точности Relation (исправленная версия)
+            # Расчет точности отношений (исправленная версия)
             if outputs['rel_logits'] is not None:
                 rel_preds = torch.argmax(outputs['rel_logits'], dim=-1)
-
-                # Правильно собираем метки отношений
                 rel_labels = []
+                
+                # Собираем все метки отношений из батча
                 for sample in batch['rel_data']:
                     if isinstance(sample, dict) and 'labels' in sample:
                         rel_labels.extend(sample['labels'])
-
-                if len(rel_labels) > 0:
+                
+                # Если есть метки отношений
+                if rel_labels:
                     rel_labels = torch.tensor(rel_labels, device=device)
-                    # Важно: учитываем batch_size при сравнении
+                    
+                    # Проверяем соответствие размеров
                     if len(rel_preds) == len(rel_labels):
                         rel_correct += (rel_preds == rel_labels).sum().item()
                         rel_total += len(rel_labels)
                     else:
-                        # Логируем несоответствие размеров
-                        print(f"Warning: preds {len(rel_preds)} != labels {len(rel_labels)}")
-
+                        # Логируем проблему для отладки
+                        tqdm.write(f"Warning: preds {len(rel_preds)} != labels {len(rel_labels)}. Skipping batch.")
+            
+            # Обновляем прогресс-бар
             progress_bar.set_postfix({
-                'loss': epoch_loss / (progress_bar.n + 1),
-                'NER_acc': f"{ner_correct/ner_total:.2%}" if ner_total > 0 else "N/A",
-                'REL_acc': f"{rel_correct/rel_total:.2%}" if rel_total > 0 else "N/A"
+                'loss': f"{epoch_loss/(progress_bar.n+1):.4f}",
+                'NER_acc': f"{ner_correct/max(ner_total,1):.2%}",
+                'REL_acc': f"{rel_correct/max(rel_total,1):.2%}" if rel_total > 0 else "N/A"
             })
-
-        # Статистика по эпохе
+        
+        # Статистика по эпохе (с защитой от деления на ноль)
         avg_loss = epoch_loss / len(train_loader)
         print(f"\nEpoch {epoch+1} Results:")
         print(f"Train Loss: {avg_loss:.4f}")
-        print(f"NER Accuracy: {ner_correct}/{ner_total} ({ner_correct/ner_total:.2%})")
-        print(f"Relation Accuracy: {rel_correct}/{rel_total} ({rel_correct/rel_total:.2%})")
-
+        print(f"NER Accuracy: {ner_correct}/{ner_total} ({ner_correct/max(ner_total,1):.2%})")
+        
+        # Вывод точности отношений только если они есть
+        if rel_total > 0:
+            print(f"Relation Accuracy: {rel_correct}/{rel_total} ({rel_correct/rel_total:.2%})")
+        else:
+            print("Relation Accuracy: No relations found in training data")
+        
+        print("-" * 50)
+    
     return model, tokenizer
-
+            
 
 def extract_relations(text, model, tokenizer, device="cpu"):
     # Tokenize input
