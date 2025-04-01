@@ -28,13 +28,13 @@ class NERRelationModel(nn.Module):
 
     def forward(self, input_ids, attention_mask, ner_labels=None, rel_data=None):
         outputs = self.bert(input_ids, attention_mask=attention_mask)
-        sequence_output = outputs.last_hidden_state  # [batch_size, seq_len, hidden_size]
+        sequence_output = outputs.last_hidden_state
 
         ner_logits = self.ner_classifier(sequence_output)
         total_loss = 0
         rel_logits = None
 
-        # NER loss calculation
+        # NER loss (оставляем без изменений)
         if ner_labels is not None:
             loss_fct = nn.CrossEntropyLoss(ignore_index=0)
             active_loss = attention_mask.view(-1) == 1
@@ -43,69 +43,51 @@ class NERRelationModel(nn.Module):
             ner_loss = loss_fct(active_logits, active_labels)
             total_loss += ner_loss
 
-        # Relation processing
-        if rel_data is not None and isinstance(rel_data, list):
-            # Собираем все сущности и отношения по батчу
-            all_entities = []
-            all_pairs = []
-            all_labels = []
-
-            for sample in rel_data:
+        # НОВАЯ обработка отношений
+        if rel_data is not None:
+            all_rel_features = []
+            all_rel_labels = []
+            
+            for batch_idx, sample in enumerate(rel_data):
                 if not isinstance(sample, dict):
                     continue
-
+                
                 entities = sample.get('entities', [])
                 pairs = sample.get('pairs', [])
                 labels = sample.get('labels', [])
-
-                offset = len(all_entities)
-                all_entities.extend(entities)
-                all_pairs.extend([(p[0]+offset, p[1]+offset) for p in pairs])
-                all_labels.extend(labels)
-
-            # Если есть хотя бы одна пара
-            if all_pairs:
-                # Получаем эмбеддинги для всех сущностей
+                
+                if not pairs:
+                    continue
+                
+                # Получаем эмбеддинги сущностей для текущего примера
                 entity_embeddings = []
-                for entity in all_entities:
+                for entity in entities:
                     start = min(entity['start'], sequence_output.size(1)-1)
                     end = min(entity['end'], sequence_output.size(1)-1)
-                    # [batch_size, hidden_size]
-                    entity_embed = sequence_output[:, start:end+1].mean(dim=1)
+                    entity_embed = sequence_output[batch_idx, start:end+1].mean(dim=0)
                     entity_embeddings.append(entity_embed)
-
-                # Подготавливаем фичи для отношений
-                rel_features = []
-                batch_size = sequence_output.size(0)
-                hidden_size = sequence_output.size(2)
-
-                for pair in all_pairs:
-                    e1 = entity_embeddings[pair[0]]  # [batch_size, hidden_size]
-                    e2 = entity_embeddings[pair[1]]  # [batch_size, hidden_size]
-
-                    # Контекст - среднее по всем токенам [batch_size, hidden_size]
-                    context = sequence_output.mean(dim=1)
-
-                    # Комбинируем фичи для каждого элемента батча
-                    for i in range(batch_size):
-                        feature = torch.cat([
-                            e1[i],  # [hidden_size]
-                            e2[i],  # [hidden_size]
-                            context[i]  # [hidden_size]
-                        ], dim=-1)  # [hidden_size*3]
-                        rel_features.append(feature)
-
-                if rel_features:
-                    rel_features = torch.stack(rel_features)  # [batch_size*num_pairs, hidden_size*3]
-                    rel_logits = self.rel_classifier(rel_features)
-
-                    # Подготавливаем метки (повторяем для каждого элемента батча)
-                    rel_labels = torch.tensor(all_labels,
-                                          dtype=torch.long,
-                                          device=input_ids.device)
-                    rel_labels = rel_labels.repeat(batch_size)
-
-                    # Вычисляем loss
+                
+                # Контекст для текущего примера
+                context = sequence_output[batch_idx].mean(dim=0)
+                
+                # Создаем фичи только для размеченных пар
+                for pair, label in zip(pairs, labels):
+                    e1 = entity_embeddings[pair[0]]
+                    e2 = entity_embeddings[pair[1]]
+                    
+                    feature = torch.cat([e1, e2, context], dim=-1)
+                    all_rel_features.append(feature)
+                    all_rel_labels.append(label)
+            
+            # Если есть отношения для обработки
+            if all_rel_features:
+                all_rel_features = torch.stack(all_rel_features)
+                rel_logits = self.rel_classifier(all_rel_features)
+                
+                if all_rel_labels:
+                    rel_labels = torch.tensor(all_rel_labels, 
+                                           dtype=torch.long, 
+                                           device=input_ids.device)
                     rel_loss_fct = nn.CrossEntropyLoss()
                     rel_loss = rel_loss_fct(rel_logits, rel_labels)
                     total_loss += rel_loss
@@ -113,8 +95,98 @@ class NERRelationModel(nn.Module):
         return {
             'ner_logits': ner_logits,
             'rel_logits': rel_logits,
-            'loss': total_loss if total_loss != 0 else torch.tensor(0.0, device=input_ids.device)
+            'loss': total_loss if total_loss != 0 else None
         }
+    
+    # def forward(self, input_ids, attention_mask, ner_labels=None, rel_data=None):
+    #     outputs = self.bert(input_ids, attention_mask=attention_mask)
+    #     sequence_output = outputs.last_hidden_state  # [batch_size, seq_len, hidden_size]
+
+    #     ner_logits = self.ner_classifier(sequence_output)
+    #     total_loss = 0
+    #     rel_logits = None
+
+    #     # NER loss calculation
+    #     if ner_labels is not None:
+    #         loss_fct = nn.CrossEntropyLoss(ignore_index=0)
+    #         active_loss = attention_mask.view(-1) == 1
+    #         active_logits = ner_logits.view(-1, self.num_ner_labels)[active_loss]
+    #         active_labels = ner_labels.view(-1)[active_loss]
+    #         ner_loss = loss_fct(active_logits, active_labels)
+    #         total_loss += ner_loss
+
+    #     # Relation processing
+    #     if rel_data is not None and isinstance(rel_data, list):
+    #         # Собираем все сущности и отношения по батчу
+    #         all_entities = []
+    #         all_pairs = []
+    #         all_labels = []
+
+    #         for sample in rel_data:
+    #             if not isinstance(sample, dict):
+    #                 continue
+
+    #             entities = sample.get('entities', [])
+    #             pairs = sample.get('pairs', [])
+    #             labels = sample.get('labels', [])
+
+    #             offset = len(all_entities)
+    #             all_entities.extend(entities)
+    #             all_pairs.extend([(p[0]+offset, p[1]+offset) for p in pairs])
+    #             all_labels.extend(labels)
+
+    #         # Если есть хотя бы одна пара
+    #         if all_pairs:
+    #             # Получаем эмбеддинги для всех сущностей
+    #             entity_embeddings = []
+    #             for entity in all_entities:
+    #                 start = min(entity['start'], sequence_output.size(1)-1)
+    #                 end = min(entity['end'], sequence_output.size(1)-1)
+    #                 # [batch_size, hidden_size]
+    #                 entity_embed = sequence_output[:, start:end+1].mean(dim=1)
+    #                 entity_embeddings.append(entity_embed)
+
+    #             # Подготавливаем фичи для отношений
+    #             rel_features = []
+    #             batch_size = sequence_output.size(0)
+    #             hidden_size = sequence_output.size(2)
+
+    #             for pair in all_pairs:
+    #                 e1 = entity_embeddings[pair[0]]  # [batch_size, hidden_size]
+    #                 e2 = entity_embeddings[pair[1]]  # [batch_size, hidden_size]
+
+    #                 # Контекст - среднее по всем токенам [batch_size, hidden_size]
+    #                 context = sequence_output.mean(dim=1)
+
+    #                 # Комбинируем фичи для каждого элемента батча
+    #                 for i in range(batch_size):
+    #                     feature = torch.cat([
+    #                         e1[i],  # [hidden_size]
+    #                         e2[i],  # [hidden_size]
+    #                         context[i]  # [hidden_size]
+    #                     ], dim=-1)  # [hidden_size*3]
+    #                     rel_features.append(feature)
+
+    #             if rel_features:
+    #                 rel_features = torch.stack(rel_features)  # [batch_size*num_pairs, hidden_size*3]
+    #                 rel_logits = self.rel_classifier(rel_features)
+
+    #                 # Подготавливаем метки (повторяем для каждого элемента батча)
+    #                 rel_labels = torch.tensor(all_labels,
+    #                                       dtype=torch.long,
+    #                                       device=input_ids.device)
+    #                 rel_labels = rel_labels.repeat(batch_size)
+
+    #                 # Вычисляем loss
+    #                 rel_loss_fct = nn.CrossEntropyLoss()
+    #                 rel_loss = rel_loss_fct(rel_logits, rel_labels)
+    #                 total_loss += rel_loss
+
+    #     return {
+    #         'ner_logits': ner_logits,
+    #         'rel_logits': rel_logits,
+    #         'loss': total_loss if total_loss != 0 else torch.tensor(0.0, device=input_ids.device)
+    #     }
 
 from collections import defaultdict
 import os
@@ -527,17 +599,6 @@ def extract_relations(text, model, tokenizer, device="cuda"):
                 })
 
 
-    persons = [e for e in entities if e['type'] == 'PERSON']
-    professions = [e for e in entities if e['type'] == 'PROFESSION']
-    
-    # Простое правило: если есть PERSON и PROFESSION, связываем их
-    if persons and professions:
-        relations.append({
-            'type': 'WORKS_AS',
-            'arg1': persons[0],
-            'arg2': professions[0]
-        })
-    
     return {
         'text': text,
         'entities': entities,
