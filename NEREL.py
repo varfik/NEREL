@@ -220,13 +220,13 @@ class NERELDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         sample = self.samples[idx]
-        print("\n=== Обработка примера ===")
-        print(f"Исходный текст: {sample['text']}")
+        # print("\n=== Обработка примера ===")
+        # print(f"Исходный текст: {sample['text']}")
 
-        # Вывод информации о сущностях
-        print("\nСущности в тексте:")
-        for entity in sample['entities']:
-            print(f"{entity['type']}: {entity['text']} (позиции: {entity['start']}-{entity['end']})")
+        # # Вывод информации о сущностях
+        # print("\nСущности в тексте:")
+        # for entity in sample['entities']:
+        #     print(f"{entity['type']}: {entity['text']} (позиции: {entity['start']}-{entity['end']})")
         text = sample['text']
         entities = sample['entities']
         relations = sample['relations']
