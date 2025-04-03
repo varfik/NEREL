@@ -86,26 +86,24 @@ class NERRelationModel(nn.Module):
             # Create entity embeddings only for valid entities
             entity_embeddings = []
             for e in valid_entities:
-                entity_embed = sequence_output[batch_idx, e['start']:e['end']+1].mean(dim=0)
+                # Ensure we don't go beyond sequence length
+                start = min(e['start'], sequence_output.size(1)-1)
+                end = min(e['end'], sequence_output.size(1)-1)
+                entity_embed = sequence_output[batch_idx, start:end+1].mean(dim=0)
                 entity_embeddings.append(entity_embed)
-            
-            # Create mapping from original entity indices to valid indices
-            valid_indices = {i:idx for idx, i in enumerate([e['original_idx'] for e in valid_entities])}
-            
-            # Process relations
+
+            # Process relations - use direct indices since we've filtered entities
             for (e1_idx, e2_idx), label in zip(sample['pairs'], sample['labels']):
-                if e1_idx in valid_indices and e2_idx in valid_indices:
-                    e1 = valid_indices[e1_idx]
-                    e2 = valid_indices[e2_idx]
-                    
+                # Check if indices are within bounds of our valid entities
+                if e1_idx < len(valid_entities) and e2_idx < len(valid_entities):
                     feature = torch.cat([
-                        entity_embeddings[e1],
-                        entity_embeddings[e2],
+                        entity_embeddings[e1_idx],
+                        entity_embeddings[e2_idx],
                         sequence_output[batch_idx].mean(dim=0)  # context
                     ], dim=-1)
                     features.append(feature)
                     labels.append(label)
-                
+        
         return torch.stack(features) if features else None, labels
 
 class NERELDataset(Dataset):
