@@ -335,26 +335,44 @@ def train_model():
     
     return model, tokenizer
 
+def print_entities_details(entities, tokens):
+    print("\nPredicted entities (detailed):")
+    for e in entities:
+        # Получаем токены сущности с правильной обработкой ##
+        entity_tokens = []
+        for i in e['token_ids']:
+            token = tokens[i]
+            if token.startswith('##'):
+                entity_tokens[-1] += token[2:]  # Объединяем с предыдущим токеном
+            else:
+                entity_tokens.append(token)
+        
+        # Восстанавливаем оригинальный текст с пробелами
+        original_text = ' '.join(entity_tokens).replace(' ##', '')
+        
+        print(f"{e['type']}:")
+        print(f"  Tokens: {' '.join([tokens[i] for i in e['token_ids']})")
+        print(f"  Token IDs: {e['start']}-{e['end']}")
+        print(f"  Reconstructed text: '{original_text}'")
+        print(f"  Raw text in dict: '{e['text']}'")
+        print("-" * 50)
+
 def predict(text, model, tokenizer, device="cuda"):
-    # encoding = tokenizer(text, return_tensors="pt", return_offsets_mapping=True).to(device)
-
+    # Токенизация с возвратом смещений
     encoding = tokenizer(text, return_tensors="pt", return_offsets_mapping=True)
-    
-    # Выведем информацию о токенизации
-    print("\nTokenization for prediction:")
     tokens = tokenizer.convert_ids_to_tokens(encoding['input_ids'][0])
-    for i, (token, (start, end)) in enumerate(zip(tokens, encoding['offset_mapping'][0])):
-        print(f"{i}: {token} (chars: {start}-{end})")
     
-    encoding = encoding.to(device)
-
+    print("\nTokenization details:")
+    for i, (token, (start, end)) in enumerate(zip(tokens, encoding['offset_mapping'][0])):
+        print(f"{i:3d}: {token:15s} (chars: {start:3d}-{end:3d}) -> '{text[start:end]}'")
+    
+    encoding = {k: v.to(device) for k, v in encoding.items()}
     
     with torch.no_grad():
         outputs = model(encoding['input_ids'], encoding['attention_mask'])
     
-    # Decode NER predictions
+    # Декодирование NER
     ner_preds = torch.argmax(outputs['ner_logits'], dim=-1)[0].cpu().numpy()
-    tokens = tokenizer.convert_ids_to_tokens(encoding['input_ids'][0])
     
     entities = []
     current_entity = None
@@ -363,32 +381,39 @@ def predict(text, model, tokenizer, device="cuda"):
         if token in ['[CLS]', '[SEP]', '[PAD]']:
             continue
             
-        if pred != 0:  # Not 'O'
-            entity_type = "PERSON" if pred == 1 else "PROFESSION"
+        entity_type = None
+        if pred == 1: entity_type = "PERSON"  # B-PER
+        elif pred == 2: entity_type = "PERSON"  # I-PER
+        elif pred == 3: entity_type = "PROFESSION"  # B-PROF
+        elif pred == 4: entity_type = "PROFESSION"  # I-PROF
+        
+        if entity_type:
+            is_beginning = pred in [1, 3]  # B-PER or B-PROF
             
-            if current_entity and current_entity['type'] == entity_type:
-                current_entity['end'] = i
-                current_entity['text'] += token.replace('##', '')
-            else:
-                if current_entity:
-                    entities.append(current_entity)
+            if current_entity and (current_entity['type'] != entity_type or is_beginning):
+                entities.append(current_entity)
+                current_entity = None
+                
+            if current_entity is None:
                 current_entity = {
                     'type': entity_type,
                     'start': i,
                     'end': i,
+                    'token_ids': [i],
                     'text': token.replace('##', '')
                 }
+            else:
+                current_entity['end'] = i
+                current_entity['token_ids'].append(i)
+                current_entity['text'] += token.replace('##', '')
     
     if current_entity:
         entities.append(current_entity)
-
-    # Выведем информацию о найденных сущностях
-    print("\nPredicted entities:")
-    for e in entities:
-        entity_tokens = [tokens[i] for i in e['token_ids']]
-        print(f"{e['type']}: {' '.join(entity_tokens)} (tokens {e['start']}-{e['end']}) -> {e['text']}")
     
-    # Extract relations
+    # Вывод подробной информации о сущностях
+    print_entities_details(entities, tokens)
+    
+    # Извлечение отношений
     relations = []
     if len(entities) >= 2 and outputs['rel_logits'] is not None:
         sequence_output = model.bert(
@@ -396,24 +421,39 @@ def predict(text, model, tokenizer, device="cuda"):
             encoding['attention_mask']
         ).last_hidden_state
         
-        context = sequence_output.mean(dim=1)
+        # Создаем все возможные пары сущностей
         pairs = [(i, j) for i in range(len(entities)) for j in range(len(entities)) if i != j]
         
         for i, j in pairs:
-            e1 = sequence_output[:, entities[i]['start']:entities[i]['end']+1].mean(dim=1)
-            e2 = sequence_output[:, entities[j]['start']:entities[j]['end']+1].mean(dim=1)
-            feature = torch.cat([e1, e2, context], dim=-1)
+            # Получаем эмбеддинги для сущностей
+            e1_start, e1_end = entities[i]['start'], entities[i]['end']
+            e2_start, e2_end = entities[j]['start'], entities[j]['end']
+            
+            e1_embed = sequence_output[0, e1_start:e1_end+1].mean(dim=0)
+            e2_embed = sequence_output[0, e2_start:e2_end+1].mean(dim=0)
+            context = sequence_output.mean(dim=1)
+            
+            feature = torch.cat([e1_embed, e2_embed, context[0]], dim=-1)
             
             with torch.no_grad():
-                rel_prob = torch.softmax(model.rel_classifier(feature), dim=-1)[0]
+                rel_prob = torch.softmax(model.rel_classifier(feature.unsqueeze(0)), dim=-1)[0]
+                pred_label = rel_prob.argmax().item()
+                confidence = rel_prob.max().item()
             
-            if rel_prob.argmax() != 2:  # Not 'NO_RELATION'
+            if pred_label != 2 and confidence > 0.5:  # Не 'NO_RELATION' и уверенность > 50%
                 relations.append({
-                    'type': "WORKS_AS" if rel_prob.argmax() == 0 else "WORKPLACE",
+                    'type': "WORKS_AS" if pred_label == 0 else "WORKPLACE",
                     'arg1': entities[i],
                     'arg2': entities[j],
-                    'confidence': rel_prob.max().item()
+                    'confidence': confidence
                 })
+    
+    # Вывод информации об отношениях
+    print("\nPredicted relations:")
+    for r in relations:
+        arg1_text = ' '.join([tokens[i] for i in r['arg1']['token_ids']).replace(' ##', '')
+        arg2_text = ' '.join([tokens[i] for i in r['arg2']['token_ids']).replace(' ##', '')
+        print(f"{r['type']}: '{arg1_text}' -> '{arg2_text}' (conf: {r['confidence']:.2f})")
     
     return {
         'text': text,
