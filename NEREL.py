@@ -67,25 +67,33 @@ class NERRelationModel(nn.Module):
         for batch_idx, sample in enumerate(rel_data):
             if not sample['pairs']:
                 continue
-                
-            # Get entity embeddings
-            entity_embeddings = [
-                sequence_output[batch_idx, e['start']:e['end']+1].mean(dim=0) 
-                for e in sample['entities']
-            ]
+             # Get entity embeddings
+            entity_embeddings = []
+            for e in sample['entities']:
+                # Ensure indices are within bounds
+                start = min(max(e['start'], 0), sequence_output.size(1)-1)
+                end = min(max(e['end'], 0), sequence_output.size(1)-1)
+                if start <= end:  # Only add if valid span
+                    entity_embed = sequence_output[batch_idx, start:end+1].mean(dim=0)
+                    entity_embeddings.append(entity_embed)
+            
+            # Skip if no valid entities
+            if not entity_embeddings:
+                continue
             
             # Context embedding
             context = sequence_output[batch_idx].mean(dim=0)
             
             # Create features for each pair
             for (e1_idx, e2_idx), label in zip(sample['pairs'], sample['labels']):
-                feature = torch.cat([
-                    entity_embeddings[e1_idx],
-                    entity_embeddings[e2_idx], 
-                    context
-                ], dim=-1)
-                features.append(feature)
-                labels.append(label)
+                # Check if indices are valid
+                if e1_idx < len(entity_embeddings) and e2_idx < len(entity_embeddings):
+                    feature = torch.cat([
+                        entity_embeddings[e1_idx],
+                        entity_embeddings[e2_idx], 
+                        context], dim=-1)
+                    features.append(feature)
+                    labels.append(label)
                 
         return torch.stack(features) if features else None, labels
 
@@ -195,9 +203,15 @@ class NERELDataset(Dataset):
             'labels': []
         }
         
+        # Create mapping from original entity IDs to valid token entity indices
+        valid_entity_map = {}
+        for new_idx, entity in enumerate(token_entities):
+            original_entity = sample['entities'][new_idx]  # Assuming same order
+            valid_entity_map[original_entity['id']] = new_idx
+        
         for relation in sample['relations']:
-            arg1_idx = entity_map.get(relation['arg1'], -1)
-            arg2_idx = entity_map.get(relation['arg2'], -1)
+            arg1_idx = valid_entity_map.get(relation['arg1'], -1)
+            arg2_idx = valid_entity_map.get(relation['arg2'], -1)
             if arg1_idx != -1 and arg2_idx != -1:
                 rel_data['pairs'].append((arg1_idx, arg2_idx))
                 rel_data['labels'].append(0 if relation['type'] == 'WORKS_AS' else 1)
