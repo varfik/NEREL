@@ -1,23 +1,21 @@
-# 1. Клонируем репозиторий (если еще не сделали)
-# !git clone https://github.com/nerel-ds/NEREL.git
-
 import torch
 import torch.nn as nn
 from transformers import AutoModel, AutoTokenizer, AutoConfig
-from torch.nn.utils.rnn import pad_sequence
+from torch.utils.data import Dataset, DataLoader
+from tqdm.auto import tqdm
+import os
+import json
+from collections import defaultdict
 
 class NERRelationModel(nn.Module):
     def __init__(self, model_name="DeepPavlov/rubert-base-cased", num_ner_labels=3, num_rel_labels=3):
         super().__init__()
-        self.num_ner_labels = num_ner_labels
-        self.num_rel_labels = num_rel_labels
-
         self.bert = AutoModel.from_pretrained(model_name)
         self.config = AutoConfig.from_pretrained(model_name)
-
+        
         # NER Head
         self.ner_classifier = nn.Linear(self.config.hidden_size, num_ner_labels)
-
+        
         # Relation Head
         self.rel_classifier = nn.Sequential(
             nn.Linear(self.config.hidden_size * 3, 256),
@@ -29,68 +27,32 @@ class NERRelationModel(nn.Module):
     def forward(self, input_ids, attention_mask, ner_labels=None, rel_data=None):
         outputs = self.bert(input_ids, attention_mask=attention_mask)
         sequence_output = outputs.last_hidden_state
-
+        
         ner_logits = self.ner_classifier(sequence_output)
         total_loss = 0
         rel_logits = None
 
-        # NER loss (оставляем без изменений)
+        # NER loss
         if ner_labels is not None:
             loss_fct = nn.CrossEntropyLoss(ignore_index=0)
             active_loss = attention_mask.view(-1) == 1
-            active_logits = ner_logits.view(-1, self.num_ner_labels)[active_loss]
-            active_labels = ner_labels.view(-1)[active_loss]
-            ner_loss = loss_fct(active_logits, active_labels)
+            ner_loss = loss_fct(
+                ner_logits.view(-1, self.ner_classifier.out_features)[active_loss],
+                ner_labels.view(-1)[active_loss]
+            )
             total_loss += ner_loss
 
-        # НОВАЯ обработка отношений
-        if rel_data is not None:
-            all_rel_features = []
-            all_rel_labels = []
+        # Relation processing
+        if rel_data and any(len(sample['pairs']) > 0 for sample in rel_data):
+            rel_features, rel_labels = self._prepare_relation_features(sequence_output, rel_data)
+            rel_logits = self.rel_classifier(rel_features)
             
-            for batch_idx, sample in enumerate(rel_data):
-                if not isinstance(sample, dict):
-                    continue
-                
-                entities = sample.get('entities', [])
-                pairs = sample.get('pairs', [])
-                labels = sample.get('labels', [])
-                
-                if not pairs:
-                    continue
-                
-                # Получаем эмбеддинги сущностей для текущего примера
-                entity_embeddings = []
-                for entity in entities:
-                    start = min(entity['start'], sequence_output.size(1)-1)
-                    end = min(entity['end'], sequence_output.size(1)-1)
-                    entity_embed = sequence_output[batch_idx, start:end+1].mean(dim=0)
-                    entity_embeddings.append(entity_embed)
-                
-                # Контекст для текущего примера
-                context = sequence_output[batch_idx].mean(dim=0)
-                
-                # Создаем фичи только для размеченных пар
-                for pair, label in zip(pairs, labels):
-                    e1 = entity_embeddings[pair[0]]
-                    e2 = entity_embeddings[pair[1]]
-                    
-                    feature = torch.cat([e1, e2, context], dim=-1)
-                    all_rel_features.append(feature)
-                    all_rel_labels.append(label)
-            
-            # Если есть отношения для обработки
-            if all_rel_features:
-                all_rel_features = torch.stack(all_rel_features)
-                rel_logits = self.rel_classifier(all_rel_features)
-                
-                if all_rel_labels:
-                    rel_labels = torch.tensor(all_rel_labels, 
-                                           dtype=torch.long, 
-                                           device=input_ids.device)
-                    rel_loss_fct = nn.CrossEntropyLoss()
-                    rel_loss = rel_loss_fct(rel_logits, rel_labels)
-                    total_loss += rel_loss
+            if len(rel_labels) > 0:
+                rel_loss = nn.CrossEntropyLoss()(
+                    rel_logits, 
+                    torch.tensor(rel_labels, device=input_ids.device)
+                )
+                total_loss += rel_loss
 
         return {
             'ner_logits': ner_logits,
@@ -98,456 +60,258 @@ class NERRelationModel(nn.Module):
             'loss': total_loss if total_loss != 0 else None
         }
     
-    # def forward(self, input_ids, attention_mask, ner_labels=None, rel_data=None):
-    #     outputs = self.bert(input_ids, attention_mask=attention_mask)
-    #     sequence_output = outputs.last_hidden_state  # [batch_size, seq_len, hidden_size]
+    def _prepare_relation_features(self, sequence_output, rel_data):
+        features, labels = [], []
+        
+        for batch_idx, sample in enumerate(rel_data):
+            if not sample['pairs']:
+                continue
+                
+            # Get entity embeddings
+            entity_embeddings = [
+                sequence_output[batch_idx, e['start']:e['end']+1].mean(dim=0) 
+                for e in sample['entities']
+            ]
+            
+            # Context embedding
+            context = sequence_output[batch_idx].mean(dim=0)
+            
+            # Create features for each pair
+            for (e1_idx, e2_idx), label in zip(sample['pairs'], sample['labels']):
+                feature = torch.cat([
+                    entity_embeddings[e1_idx],
+                    entity_embeddings[e2_idx], 
+                    context
+                ], dim=-1)
+                features.append(feature)
+                labels.append(label)
+                
+        return torch.stack(features) if features else None, labels
 
-    #     ner_logits = self.ner_classifier(sequence_output)
-    #     total_loss = 0
-    #     rel_logits = None
-
-    #     # NER loss calculation
-    #     if ner_labels is not None:
-    #         loss_fct = nn.CrossEntropyLoss(ignore_index=0)
-    #         active_loss = attention_mask.view(-1) == 1
-    #         active_logits = ner_logits.view(-1, self.num_ner_labels)[active_loss]
-    #         active_labels = ner_labels.view(-1)[active_loss]
-    #         ner_loss = loss_fct(active_logits, active_labels)
-    #         total_loss += ner_loss
-
-    #     # Relation processing
-    #     if rel_data is not None and isinstance(rel_data, list):
-    #         # Собираем все сущности и отношения по батчу
-    #         all_entities = []
-    #         all_pairs = []
-    #         all_labels = []
-
-    #         for sample in rel_data:
-    #             if not isinstance(sample, dict):
-    #                 continue
-
-    #             entities = sample.get('entities', [])
-    #             pairs = sample.get('pairs', [])
-    #             labels = sample.get('labels', [])
-
-    #             offset = len(all_entities)
-    #             all_entities.extend(entities)
-    #             all_pairs.extend([(p[0]+offset, p[1]+offset) for p in pairs])
-    #             all_labels.extend(labels)
-
-    #         # Если есть хотя бы одна пара
-    #         if all_pairs:
-    #             # Получаем эмбеддинги для всех сущностей
-    #             entity_embeddings = []
-    #             for entity in all_entities:
-    #                 start = min(entity['start'], sequence_output.size(1)-1)
-    #                 end = min(entity['end'], sequence_output.size(1)-1)
-    #                 # [batch_size, hidden_size]
-    #                 entity_embed = sequence_output[:, start:end+1].mean(dim=1)
-    #                 entity_embeddings.append(entity_embed)
-
-    #             # Подготавливаем фичи для отношений
-    #             rel_features = []
-    #             batch_size = sequence_output.size(0)
-    #             hidden_size = sequence_output.size(2)
-
-    #             for pair in all_pairs:
-    #                 e1 = entity_embeddings[pair[0]]  # [batch_size, hidden_size]
-    #                 e2 = entity_embeddings[pair[1]]  # [batch_size, hidden_size]
-
-    #                 # Контекст - среднее по всем токенам [batch_size, hidden_size]
-    #                 context = sequence_output.mean(dim=1)
-
-    #                 # Комбинируем фичи для каждого элемента батча
-    #                 for i in range(batch_size):
-    #                     feature = torch.cat([
-    #                         e1[i],  # [hidden_size]
-    #                         e2[i],  # [hidden_size]
-    #                         context[i]  # [hidden_size]
-    #                     ], dim=-1)  # [hidden_size*3]
-    #                     rel_features.append(feature)
-
-    #             if rel_features:
-    #                 rel_features = torch.stack(rel_features)  # [batch_size*num_pairs, hidden_size*3]
-    #                 rel_logits = self.rel_classifier(rel_features)
-
-    #                 # Подготавливаем метки (повторяем для каждого элемента батча)
-    #                 rel_labels = torch.tensor(all_labels,
-    #                                       dtype=torch.long,
-    #                                       device=input_ids.device)
-    #                 rel_labels = rel_labels.repeat(batch_size)
-
-    #                 # Вычисляем loss
-    #                 rel_loss_fct = nn.CrossEntropyLoss()
-    #                 rel_loss = rel_loss_fct(rel_logits, rel_labels)
-    #                 total_loss += rel_loss
-
-    #     return {
-    #         'ner_logits': ner_logits,
-    #         'rel_logits': rel_logits,
-    #         'loss': total_loss if total_loss != 0 else torch.tensor(0.0, device=input_ids.device)
-    #     }
-
-from collections import defaultdict
-import os
-import json
-
-class NERELDataset(torch.utils.data.Dataset):
-    def __init__(self, data_dir, tokenizer, max_length=512, show_examples=True):
+class NERELDataset(Dataset):
+    def __init__(self, data_dir, tokenizer, max_length=512):
         self.data_dir = data_dir
         self.tokenizer = tokenizer
         self.max_length = max_length
-        self.show_examples = show_examples
         self.samples = self._load_samples()
         
-        print(f"Loaded {len(self.samples)} samples")
-        print(f"Relations count: {sum(len(s['relations']) for s in self.samples)}")
-        
-        if self.show_examples:
-            print("\nПримеры с отношениями (первые 10):")
-            shown = 0
-            for i, sample in enumerate(self.samples):
-                if sample['relations'] and shown < 1:
-                    print(f"\nПример {i+1}:")
-                    print(f"Текст: {sample['text']}")
-                    print("Сущности:")
-                    for entity in sample['entities']:
-                        print(f"  {entity['type']}: {entity['text']} ({entity['start']}-{entity['end']})")
-                    print("Отношения:")
-                    for rel in sample['relations']:
-                        print(f"  {rel['type']}: {rel['arg1']} -> {rel['arg2']}")
-                    shown += 1
-
     def _load_samples(self):
         samples = []
-        # Собираем все .txt файлы в папке
-        txt_files = [f for f in os.listdir(self.data_dir) if f.endswith('.txt')]
-
-        for txt_file in txt_files:
-            txt_path = os.path.join(self.data_dir, txt_file)
+        for txt_file in [f for f in os.listdir(self.data_dir) if f.endswith('.txt')]:
             ann_path = os.path.join(self.data_dir, txt_file.replace('.txt', '.ann'))
-
-            # Проверяем, есть ли соответствующий .ann файл
             if not os.path.exists(ann_path):
                 continue
-
-            with open(txt_path, 'r', encoding='utf-8') as f:
+                
+            with open(os.path.join(self.data_dir, txt_file), 'r', encoding='utf-8') as f:
                 text = f.read()
-
+            
             entities, relations = self._parse_ann_file(ann_path)
-            samples.append({
-                'text': text,
-                'entities': entities,
-                'relations': relations
-            })
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        print(f"Found {len(txt_files)} .txt files in {self.data_dir}")
-        print(f"Loaded {len(samples)} samples")
-        if samples:
-            print(f"First sample relations: {samples[0]['relations']}")
+            samples.append({'text': text, 'entities': entities, 'relations': relations})
+        
         return samples
-
+    
     def _parse_ann_file(self, ann_path):
-        entities = []
-        relations = []
-
+        entities, relations = [], []
+        entity_map = {}
+        
         with open(ann_path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-
-        for line in lines:
-            if line.startswith('T'):
-                parts = line.strip().split('\t')
-                entity_id = parts[0]
-                type_and_span = parts[1].split()
-                entity_type = type_and_span[0]
-                start, end = int(type_and_span[1]), int(type_and_span[-1])
-                text = parts[2]
-
-                if entity_type in ['PERSON', 'PROFESSION']:
-                    entities.append({
-                        'id': entity_id,
-                        'type': entity_type,
-                        'start': start,
-                        'end': end,
-                        'text': text
-                    })
-
-            elif line.startswith('R'):
-                parts = line.strip().split('\t')
-                rel_type = parts[1].split()[0]
-                arg1 = parts[1].split()[1].split(':')[1]
-                arg2 = parts[1].split()[2].split(':')[1]
-
-                if rel_type in ['WORKS_AS', 'WORKPLACE']:
-                    relations.append({
-                        'type': rel_type,
-                        'arg1': arg1,
-                        'arg2': arg2
-                    })
-
+            for line in f:
+                if line.startswith('T'):
+                    parts = line.strip().split('\t')
+                    entity_id = parts[0]
+                    type_and_span = parts[1].split()
+                    entity_type = type_and_span[0]
+                    
+                    if entity_type in ['PERSON', 'PROFESSION']:
+                        entity = {
+                            'id': entity_id,
+                            'type': entity_type,
+                            'start': int(type_and_span[1]),
+                            'end': int(type_and_span[-1]),
+                            'text': parts[2]
+                        }
+                        entities.append(entity)
+                        entity_map[entity_id] = entity
+                
+                elif line.startswith('R'):
+                    parts = line.strip().split('\t')
+                    rel_type, arg1, arg2 = parts[1].split()
+                    arg1 = arg1.split(':')[1]
+                    arg2 = arg2.split(':')[1]
+                    
+                    if rel_type in ['WORKS_AS', 'WORKPLACE'] and arg1 in entity_map and arg2 in entity_map:
+                        relations.append({
+                            'type': rel_type,
+                            'arg1': arg1,
+                            'arg2': arg2
+                        })
+        
         return entities, relations
-
+    
     def __len__(self):
         return len(self.samples)
-
+    
     def __getitem__(self, idx):
         sample = self.samples[idx]
-        # print("\n=== Обработка примера ===")
-        # print(f"Исходный текст: {sample['text']}")
-
-        # # Вывод информации о сущностях
-        # print("\nСущности в тексте:")
-        # for entity in sample['entities']:
-        #     print(f"{entity['type']}: {entity['text']} (позиции: {entity['start']}-{entity['end']})")
-        text = sample['text']
-        entities = sample['entities']
-        relations = sample['relations']
-
-        # Tokenize text
-        encoding = self.tokenizer(text,
-                                max_length=self.max_length,
-                                truncation=True,
-                                return_offsets_mapping=True)
-
+        encoding = self.tokenizer(
+            sample['text'],
+            max_length=self.max_length,
+            truncation=True,
+            return_offsets_mapping=True
+        )
+        
         # Align entities with tokens
         token_entities = []
-        for entity in entities:
-            start_char = entity['start']
-            end_char = entity['end']
-
-            # Find tokens that overlap with entity span
-            start_token = None
-            end_token = None
+        for entity in sample['entities']:
+            start_token = end_token = None
             for i, (start, end) in enumerate(encoding['offset_mapping']):
-                if start <= start_char < end:
+                if start <= entity['start'] < end:
                     start_token = i
-                if start < end_char <= end:
+                if start < entity['end'] <= end:
                     end_token = i
                     break
-
+            
             if start_token is not None and end_token is not None:
                 token_entities.append({
                     'start': start_token,
                     'end': end_token,
                     'type': entity['type']
                 })
-
+        
         # Prepare NER labels
-        ner_labels = [0] * len(encoding['input_ids'])  # 0 = O (outside)
+        ner_labels = [0] * len(encoding['input_ids'])
         for entity in token_entities:
             ner_labels[entity['start']] = 1 if entity['type'] == 'PERSON' else 2
             for i in range(entity['start'] + 1, entity['end'] + 1):
                 ner_labels[i] = ner_labels[entity['start']]
-
-        # Prepare relation data (даже если нет отношений)
+        
+        # Prepare relation data
+        entity_map = {e['id']: i for i, e in enumerate(sample['entities'])}
         rel_data = {
             'entities': token_entities,
             'pairs': [],
             'labels': []
         }
-
-        # Если есть сущности и отношения
-        if len(token_entities) >= 2 and len(relations) > 0:
-            entity_map = {e['id']: i for i, e in enumerate(entities)}
-            for relation in relations:
-                arg1_idx = entity_map.get(relation['arg1'], -1)
-                arg2_idx = entity_map.get(relation['arg2'], -1)
-
-                if arg1_idx != -1 and arg2_idx != -1 and arg1_idx < len(token_entities) and arg2_idx < len(token_entities):
-                    rel_data['pairs'].append((arg1_idx, arg2_idx))
-                    rel_data['labels'].append(0 if relation['type'] == 'WORKS_AS' else 1)
-                    
-        if idx < 10 and self.show_examples:
-            print(f"\n=== Пример {idx+1} ===")
-            print("Токены и их индексы:")
-            for i, (token_id, offset) in enumerate(zip(encoding['input_ids'], encoding['offset_mapping'])):
-                token = self.tokenizer.decode([token_id])
-                print(f"{i}: {token} (id: {token_id}, offset: {offset[0]}-{offset[1]})")
-                
+        
+        for relation in sample['relations']:
+            arg1_idx = entity_map.get(relation['arg1'], -1)
+            arg2_idx = entity_map.get(relation['arg2'], -1)
+            if arg1_idx != -1 and arg2_idx != -1:
+                rel_data['pairs'].append((arg1_idx, arg2_idx))
+                rel_data['labels'].append(0 if relation['type'] == 'WORKS_AS' else 1)
+        
         return {
             'input_ids': torch.tensor(encoding['input_ids']),
             'attention_mask': torch.tensor(encoding['attention_mask']),
             'ner_labels': torch.tensor(ner_labels),
-            'rel_data': rel_data  # Всегда содержит 'entities', 'pairs' и 'labels'
+            'rel_data': rel_data
         }
 
-from torch.optim import AdamW
-from torch.utils.data import DataLoader
-from tqdm.auto import tqdm  # Добавляем импорт прогресс-бара
-
-from torch.optim import AdamW  # Исправленный импорт
-from torch.utils.data import DataLoader
-
-from torch.nn.utils.rnn import pad_sequence
-
-def train_model():
-    tokenizer = AutoTokenizer.from_pretrained("DeepPavlov/rubert-base-cased")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+def collate_fn(batch):
+    max_len = max(len(item['input_ids']) for item in batch)
     
-    # Перенос модели на устройство
-    model = NERRelationModel(num_ner_labels=3, num_rel_labels=3).to(device)
-
-    def collate_fn(batch):
-        # Получаем максимальную длину в батче
-        max_len = max(len(item['input_ids']) for item in batch)
-
-        # Применяем паддинг ко всем элементам батча
-        input_ids = torch.stack([
+    padded_batch = {
+        'input_ids': torch.stack([
             torch.nn.functional.pad(
                 item['input_ids'],
                 (0, max_len - len(item['input_ids'])),
-                value=tokenizer.pad_token_id
+                value=0
             ) for item in batch
-        ])
-
-        attention_mask = torch.stack([
+        ]),
+        'attention_mask': torch.stack([
             torch.nn.functional.pad(
                 item['attention_mask'],
                 (0, max_len - len(item['attention_mask'])),
                 value=0
             ) for item in batch
-        ])
-
-        ner_labels = torch.stack([
+        ]),
+        'ner_labels': torch.stack([
             torch.nn.functional.pad(
                 item['ner_labels'],
                 (0, max_len - len(item['ner_labels'])),
-                value=0  # Паддинг для меток NER (0 обычно соответствует 'O')
+                value=0
             ) for item in batch
-        ])
+        ]),
+        'rel_data': [item['rel_data'] for item in batch]
+    }
+    return padded_batch
 
-        # Обработка rel_data - сохраняем как список словарей
-        rel_data = [item['rel_data'] for item in batch]
-
-        return {
-            'input_ids': input_ids,
-            'attention_mask': attention_mask,
-            'ner_labels': ner_labels,
-            'rel_data': rel_data  # Это будет список словарей
-        }
-
+def train_model():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    tokenizer = AutoTokenizer.from_pretrained("DeepPavlov/rubert-base-cased")
+    model = NERRelationModel().to(device)
+    
     train_dataset = NERELDataset("NEREL/NEREL-v1.1/train", tokenizer)
-    has_relations = any(len(sample['relations']) > 0 for sample in train_dataset.samples)
-    if not has_relations:
-        print("ОШИБКА: В обучающих данных нет отношений!")
-        print("Проверьте:")
-        print("1. Путь к данным (должен быть /NEREL/NEREL-v1.1/train)")
-        print("2. Содержимое .ann файлов (должны быть строки с 'R')")
-        print("3. Фильтрацию отношений в _parse_ann_file()")
     train_loader = DataLoader(train_dataset, batch_size=4, collate_fn=collate_fn, shuffle=True)
-
+    
     optimizer = AdamW(model.parameters(), lr=5e-5)
-
-    for epoch in range(1):
+    
+    for epoch in range(3):
         model.train()
-        epoch_loss = 0
-        ner_correct = 0
-        ner_total = 0
-        rel_correct = 0
-        rel_total = 0
+        epoch_loss = ner_correct = ner_total = rel_correct = rel_total = 0
         
-        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}")
-        
-        for batch in progress_bar:
+        for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}"):
             optimizer.zero_grad()
-
+            
             inputs = {
                 'input_ids': batch['input_ids'].to(device),
                 'attention_mask': batch['attention_mask'].to(device),
                 'ner_labels': batch['ner_labels'].to(device),
                 'rel_data': batch['rel_data']
             }
-
+            
             outputs = model(**inputs)
-            loss = outputs['loss']
-            loss.backward()
+            outputs['loss'].backward()
             optimizer.step()
-
-            epoch_loss += loss.item()
-
-            # Расчет точности NER
-            if outputs['ner_logits'] is not None:
-                ner_preds = torch.argmax(outputs['ner_logits'], dim=-1)
-                active_mask = inputs['attention_mask'] == 1
-                ner_correct += ((ner_preds == inputs['ner_labels']) & active_mask).sum().item()
-                ner_total += active_mask.sum().item()
-
-            # Расчет точности отношений (исправленная версия)
+            
+            epoch_loss += outputs['loss'].item()
+            
+            # Calculate NER accuracy
+            ner_preds = torch.argmax(outputs['ner_logits'], dim=-1)
+            active_mask = inputs['attention_mask'] == 1
+            ner_correct += ((ner_preds == inputs['ner_labels']) & active_mask).sum().item()
+            ner_total += active_mask.sum().item()
+            
+            # Calculate relation accuracy
             if outputs['rel_logits'] is not None:
                 rel_preds = torch.argmax(outputs['rel_logits'], dim=-1)
-                rel_labels = []
+                rel_labels = [
+                    label for sample in batch['rel_data'] 
+                    for label in sample.get('labels', [])
+                ]
                 
-                # Собираем все метки отношений из батча
-                for sample in batch['rel_data']:
-                    if isinstance(sample, dict) and 'labels' in sample:
-                        rel_labels.extend(sample['labels'])
-                
-                # Если есть метки отношений
                 if rel_labels:
-                    rel_labels = torch.tensor(rel_labels, device=device)
-                    
-                    # Проверяем соответствие размеров
-                    if len(rel_preds) == len(rel_labels):
-                        rel_correct += (rel_preds == rel_labels).sum().item()
-                        rel_total += len(rel_labels)
-                    else:
-                        # Логируем проблему для отладки
-                        tqdm.write(f"Warning: preds {len(rel_preds)} != labels {len(rel_labels)}. Skipping batch.")
-            
-            # Обновляем прогресс-бар
-            progress_bar.set_postfix({
-                'loss': f"{epoch_loss/(progress_bar.n+1):.4f}",
-                'NER_acc': f"{ner_correct/max(ner_total,1):.2%}",
-                'REL_acc': f"{rel_correct/max(rel_total,1):.2%}" if rel_total > 0 else "N/A"
-            })
+                    rel_correct += (rel_preds == torch.tensor(rel_labels, device=device)).sum().item()
+                    rel_total += len(rel_labels)
         
-        # Статистика по эпохе (с защитой от деления на ноль)
-        avg_loss = epoch_loss / len(train_loader)
         print(f"\nEpoch {epoch+1} Results:")
-        print(f"Train Loss: {avg_loss:.4f}")
-        print(f"NER Accuracy: {ner_correct}/{ner_total} ({ner_correct/max(ner_total,1):.2%})")
-        
-        # Вывод точности отношений только если они есть
+        print(f"Loss: {epoch_loss/len(train_loader):.4f}")
+        print(f"NER Accuracy: {ner_correct/ner_total:.2%}")
         if rel_total > 0:
-            print(f"Relation Accuracy: {rel_correct}/{rel_total} ({rel_correct/rel_total:.2%})")
-        else:
-            print("Relation Accuracy: No relations found in training data")
-        
-        print("-" * 50)
+            print(f"Relation Accuracy: {rel_correct/rel_total:.2%}")
     
     return model, tokenizer
-            
 
-def extract_relations(text, model, tokenizer, device="cuda"):
-    # Добавляем пробелы перед знаками препинания для лучшей токенизации
-    text = text.replace(',', ' , ').replace('.', ' . ')
+def predict(text, model, tokenizer, device="cuda"):
+    encoding = tokenizer(text, return_tensors="pt", return_offsets_mapping=True).to(device)
     
-    encoding = tokenizer(text, return_tensors="pt", return_offsets_mapping=True)
-    input_ids = encoding["input_ids"].to(device)
-    attention_mask = encoding["attention_mask"].to(device)
-    
-    # Предсказание
     with torch.no_grad():
-        outputs = model(input_ids, attention_mask)
-
+        outputs = model(encoding['input_ids'], encoding['attention_mask'])
+    
     # Decode NER predictions
     ner_preds = torch.argmax(outputs['ner_logits'], dim=-1)[0].cpu().numpy()
-
+    tokens = tokenizer.convert_ids_to_tokens(encoding['input_ids'][0])
+    
     entities = []
     current_entity = None
     
-    for i, (token_id, pred) in enumerate(zip(input_ids[0], ner_preds)):
-        token = tokenizer.decode([token_id])
-        
-        # Пропускаем спецтокены
+    for i, (token, pred) in enumerate(zip(tokens, ner_preds)):
         if token in ['[CLS]', '[SEP]', '[PAD]']:
             continue
             
-        if pred != 0:  # Не O
+        if pred != 0:  # Not 'O'
             entity_type = "PERSON" if pred == 1 else "PROFESSION"
             
-            # Объединяем подтокены
             if current_entity and current_entity['type'] == entity_type:
                 current_entity['end'] = i
                 current_entity['text'] += token.replace('##', '')
@@ -560,62 +324,54 @@ def extract_relations(text, model, tokenizer, device="cuda"):
                     'end': i,
                     'text': token.replace('##', '')
                 }
-
-    # Добавляем последнюю сущность
+    
     if current_entity:
         entities.append(current_entity)
-
-
-    # Extract relations if there are at least 2 entities
+    
+    # Extract relations
     relations = []
     if len(entities) >= 2 and outputs['rel_logits'] is not None:
-        # Get all possible entity pairs
+        sequence_output = model.bert(
+            encoding['input_ids'], 
+            encoding['attention_mask']
+        ).last_hidden_state
+        
+        context = sequence_output.mean(dim=1)
         pairs = [(i, j) for i in range(len(entities)) for j in range(len(entities)) if i != j]
-
-        # Prepare relation features
-        sequence_output = model.bert(input_ids, attention_mask).last_hidden_state
-        context_embed = sequence_output.mean(dim=1)
-
-        rel_features = []
-        for pair in pairs:
-            e1_embed = sequence_output[:, entities[pair[0]]['start']:entities[pair[0]]['end']].mean(dim=1)
-            e2_embed = sequence_output[:, entities[pair[1]]['start']:entities[pair[1]]['end']].mean(dim=1)
-            combined = torch.cat([e1_embed, e2_embed, context_embed], dim=-1)
-            rel_features.append(combined)
-
-        rel_features = torch.stack(rel_features)
-        rel_logits = model.rel_classifier(rel_features)
-        rel_preds = torch.argmax(rel_logits, dim=-1).cpu().numpy()
-
-        # Filter only meaningful relations
-        for i, pred in enumerate(rel_preds):
-            if pred != 2:  # 2 = NO_RELATION (assuming 3 classes)
-                e1_idx, e2_idx = pairs[i]
-                rel_type = "WORKS_AS" if pred == 0 else "WORKPLACE"
+        
+        for i, j in pairs:
+            e1 = sequence_output[:, entities[i]['start']:entities[i]['end']+1].mean(dim=1)
+            e2 = sequence_output[:, entities[j]['start']:entities[j]['end']+1].mean(dim=1)
+            feature = torch.cat([e1, e2, context], dim=-1)
+            
+            with torch.no_grad():
+                rel_prob = torch.softmax(model.rel_classifier(feature), dim=-1)[0]
+            
+            if rel_prob.argmax() != 2:  # Not 'NO_RELATION'
                 relations.append({
-                    'type': rel_type,
-                    'arg1': entities[e1_idx],
-                    'arg2': entities[e2_idx]
+                    'type': "WORKS_AS" if rel_prob.argmax() == 0 else "WORKPLACE",
+                    'arg1': entities[i],
+                    'arg2': entities[j],
+                    'confidence': rel_prob.max().item()
                 })
-
-
+    
     return {
         'text': text,
         'entities': entities,
         'relations': relations
     }
 
-# Обучение модели
-model, tokenizer = train_model()
-
-# Пример использования
-text = "Айрат Мурзагалиев, заместителя начальника управления президента РФ по внутренней политике, встретился с главой администрации Уфы."
-result = extract_relations(text, model, tokenizer)
-
-print("Извлеченные сущности:")
-for entity in result['entities']:
-    print(f"{entity['type']}: {entity['text']}")
-
-print("\nИзвлеченные отношения:")
-for rel in result['relations']:
-    print(f"{rel['type']}: {rel['arg1']['text']} -> {rel['arg2']['text']}")
+# Usage example
+if __name__ == "__main__":
+    model, tokenizer = train_model()
+    
+    text = "Айрат Мурзагалиев, заместитель начальника управления президента РФ, встретился с главой администрации Уфы."
+    result = predict(text, model, tokenizer)
+    
+    print("\nEntities:")
+    for e in result['entities']:
+        print(f"{e['type']}: {e['text']}")
+    
+    print("\nRelations:")
+    for r in result['relations']:
+        print(f"{r['type']}: {r['arg1']['text']} -> {r['arg2']['text']} (conf: {r['confidence']:.2f})")
