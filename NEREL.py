@@ -451,8 +451,8 @@ def predict(text, model, tokenizer, device="cuda"):
     # Вывод информации об отношениях
     print("\nPredicted relations:")
     for r in relations:
-        arg1_text = ' '.join([tokens[i] for i in r['arg1']['token_ids']).replace(' ##', '')
-        arg2_text = ' '.join([tokens[i] for i in r['arg2']['token_ids']).replace(' ##', '')
+        arg1_text = ' '.join([tokens[i] for i in r['arg1']['token_ids']]).replace(' ##', '')
+        arg2_text = ' '.join([tokens[i] for i in r['arg2']['token_ids']]).replace(' ##', '')
         print(f"{r['type']}: '{arg1_text}' -> '{arg2_text}' (conf: {r['confidence']:.2f})")
     
     return {
