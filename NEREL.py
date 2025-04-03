@@ -181,13 +181,18 @@ class NERELDataset(Dataset):
          # Initialize all labels as 'O' (0)
         ner_labels = [0] * len(encoding['input_ids'])
         
+        # Create mapping from entity ID to entity index in original sample
+        entity_id_to_idx = {e['id']: idx for idx, e in enumerate(sample['entities'])}
+        
         # Align entities with tokens
         token_entities = []
-        for orig_idx, entity in enumerate(sample['entities']):
+        for entity in sample['entities']:
             start_token = end_token = None
             for i, (start, end) in enumerate(encoding['offset_mapping']):
+                # Check if token overlaps with entity start
                 if start <= entity['start'] < end and start_token is None:
                     start_token = i
+                # Check if token overlaps with entity end
                 if start < entity['end'] <= end and end_token is None:
                     end_token = i
             
@@ -195,14 +200,14 @@ class NERELDataset(Dataset):
                 # Mark first token as B-ENTITY
                 ner_labels[start_token] = 1 if entity['type'] == 'PERSON' else 3
                 # Mark subsequent tokens as I-ENTITY
-                for i in range(start_token+1, end_token+1):
+                for i in range(start_token + 1, end_token + 1):
                     ner_labels[i] = 2 if entity['type'] == 'PERSON' else 4
                 
                 token_entities.append({
                     'start': start_token,
                     'end': end_token,
                     'type': entity['type'],
-                    'original_idx': orig_idx  # Store original index for relation mapping
+                    'id': entity['id']  # Store original ID for relation mapping
                 })
         
         # Prepare relation data
@@ -212,19 +217,17 @@ class NERELDataset(Dataset):
             'labels': []
         }
         
-        # Create mapping from original entity IDs to token entity indices
-        id_to_idx = {e['id']: i for i, e in enumerate(sample['entities'])}
-        token_entity_indices = {e['original_idx']: i for i, e in enumerate(token_entities)}
+        # Create mapping from entity ID to token entity index
+        token_entity_id_to_idx = {e['id']: i for i, e in enumerate(token_entities)}
         
         for relation in sample['relations']:
-            arg1_orig = id_to_idx.get(relation['arg1'], -1)
-            arg2_orig = id_to_idx.get(relation['arg2'], -1)
+            # Get token entity indices for relation arguments
+            arg1_token_idx = token_entity_id_to_idx.get(relation['arg1'], -1)
+            arg2_token_idx = token_entity_id_to_idx.get(relation['arg2'], -1)
             
-            arg1_token = token_entity_indices.get(arg1_orig, -1)
-            arg2_token = token_entity_indices.get(arg2_orig, -1)
-            
-            if arg1_token != -1 and arg2_token != -1:
-                rel_data['pairs'].append((arg1_token, arg2_token))
+            # Only add if both entities were successfully tokenized
+            if arg1_token_idx != -1 and arg2_token_idx != -1:
+                rel_data['pairs'].append((arg1_token_idx, arg2_token_idx))
                 rel_data['labels'].append(0 if relation['type'] == 'WORKS_AS' else 1)
         
         return {
@@ -233,6 +236,7 @@ class NERELDataset(Dataset):
             'ner_labels': torch.tensor(ner_labels),
             'rel_data': rel_data
         }
+
 
 def collate_fn(batch):
     max_len = max(len(item['input_ids']) for item in batch)
