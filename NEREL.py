@@ -183,57 +183,48 @@ class NERELDataset(Dataset):
         
         # Align entities with tokens
         token_entities = []
-        for entity in sample['entities']:
-            # Find token spans that overlap with entity
-            start_token = None
-            end_token = None
+        for orig_idx, entity in enumerate(sample['entities']):
+            start_token = end_token = None
             for i, (start, end) in enumerate(encoding['offset_mapping']):
-                # Check if token overlaps with entity start
                 if start <= entity['start'] < end and start_token is None:
                     start_token = i
-                # Check if token overlaps with entity end
                 if start < entity['end'] <= end and end_token is None:
                     end_token = i
             
             if start_token is not None and end_token is not None:
                 # Mark first token as B-ENTITY
-                ner_labels[start_token] = 1 if entity['type'] == 'PERSON' else 2
+                ner_labels[start_token] = 1 if entity['type'] == 'PERSON' else 3
                 # Mark subsequent tokens as I-ENTITY
                 for i in range(start_token+1, end_token+1):
-                    ner_labels[i] = 3 if entity['type'] == 'PERSON' else 4
+                    ner_labels[i] = 2 if entity['type'] == 'PERSON' else 4
                 
                 token_entities.append({
                     'start': start_token,
                     'end': end_token,
-                    'type': entity['type']
+                    'type': entity['type'],
+                    'original_idx': orig_idx  # Store original index for relation mapping
                 })
         
-        # Prepare NER labels
-        ner_labels = [0] * len(encoding['input_ids'])
-        for entity in token_entities:
-            ner_labels[entity['start']] = 1 if entity['type'] == 'PERSON' else 2
-            for i in range(entity['start'] + 1, entity['end'] + 1):
-                ner_labels[i] = ner_labels[entity['start']]
-        
         # Prepare relation data
-        entity_map = {e['id']: i for i, e in enumerate(sample['entities'])}
         rel_data = {
             'entities': token_entities,
             'pairs': [],
             'labels': []
         }
         
-        # Create mapping from original entity IDs to valid token entity indices
-        valid_entity_map = {}
-        for new_idx, entity in enumerate(token_entities):
-            original_entity = sample['entities'][new_idx]  # Assuming same order
-            valid_entity_map[original_entity['id']] = new_idx
+        # Create mapping from original entity IDs to token entity indices
+        id_to_idx = {e['id']: i for i, e in enumerate(sample['entities'])}
+        token_entity_indices = {e['original_idx']: i for i, e in enumerate(token_entities)}
         
         for relation in sample['relations']:
-            arg1_idx = valid_entity_map.get(relation['arg1'], -1)
-            arg2_idx = valid_entity_map.get(relation['arg2'], -1)
-            if arg1_idx != -1 and arg2_idx != -1:
-                rel_data['pairs'].append((arg1_idx, arg2_idx))
+            arg1_orig = id_to_idx.get(relation['arg1'], -1)
+            arg2_orig = id_to_idx.get(relation['arg2'], -1)
+            
+            arg1_token = token_entity_indices.get(arg1_orig, -1)
+            arg2_token = token_entity_indices.get(arg2_orig, -1)
+            
+            if arg1_token != -1 and arg2_token != -1:
+                rel_data['pairs'].append((arg1_token, arg2_token))
                 rel_data['labels'].append(0 if relation['type'] == 'WORKS_AS' else 1)
         
         return {
