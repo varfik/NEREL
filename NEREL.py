@@ -135,6 +135,7 @@ class NERELDataset(Dataset):
                         entity_map[entity_id] = entity
                 
                 elif line.startswith('R'):
+                    print("HEREEEEEEEEEEEEEEEEE")
                     parts = line.strip().split('\t')
                     rel_type, arg1, arg2 = parts[1].split()
                     arg1 = arg1.split(':')[1]
@@ -146,7 +147,7 @@ class NERELDataset(Dataset):
                             'arg1': arg1,
                             'arg2': arg2
                         })
-        
+        print(f"RELATIONS: {relations}")
         return entities, relations
     
     def __len__(self):
