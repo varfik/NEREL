@@ -9,17 +9,22 @@ import json
 from collections import defaultdict
 
 class NERRelationModel(nn.Module):
-    def __init__(self, model_name="DeepPavlov/rubert-base-cased", num_ner_labels=3, num_rel_labels=3):
+    def __init__(self, model_name="DeepPavlov/rubert-base-cased", num_ner_labels=5, num_rel_labels=3):
         super().__init__()
         self.bert = AutoModel.from_pretrained(model_name)
         self.config = AutoConfig.from_pretrained(model_name)
         
-        # NER Head
-        self.ner_classifier = nn.Linear(self.config.hidden_size, num_ner_labels)
+        # Enhanced NER Head
+        self.ner_classifier = nn.Sequential(
+            nn.Linear(self.bert.config.hidden_size, 256),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(256, num_ner_labels)  # Now 5 classes: O, B-PER, I-PER, B-PROF, I-PROF
+        )
         
-        # Relation Head
+        # Relation Head remains the same
         self.rel_classifier = nn.Sequential(
-            nn.Linear(self.config.hidden_size * 3, 256),
+            nn.Linear(self.bert.config.hidden_size * 3, 256),
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(256, num_rel_labels)
@@ -65,33 +70,34 @@ class NERRelationModel(nn.Module):
         features, labels = [], []
         
         for batch_idx, sample in enumerate(rel_data):
-            if not sample['pairs']:
+            if not sample.get('pairs', []):
                 continue
-             # Get entity embeddings
+                
+            # Get only valid entities that were properly tokenized
+            valid_entities = [e for e in sample['entities'] if e['start'] <= e['end']]
+            if len(valid_entities) < 2:
+                continue
+                
+            # Create entity embeddings only for valid entities
             entity_embeddings = []
-            for e in sample['entities']:
-                # Ensure indices are within bounds
-                start = min(max(e['start'], 0), sequence_output.size(1)-1)
-                end = min(max(e['end'], 0), sequence_output.size(1)-1)
-                if start <= end:  # Only add if valid span
-                    entity_embed = sequence_output[batch_idx, start:end+1].mean(dim=0)
-                    entity_embeddings.append(entity_embed)
+            for e in valid_entities:
+                entity_embed = sequence_output[batch_idx, e['start']:e['end']+1].mean(dim=0)
+                entity_embeddings.append(entity_embed)
             
-            # Skip if no valid entities
-            if not entity_embeddings:
-                continue
+            # Create mapping from original entity indices to valid indices
+            valid_indices = {i:idx for idx, i in enumerate([e['original_idx'] for e in valid_entities])}
             
-            # Context embedding
-            context = sequence_output[batch_idx].mean(dim=0)
-            
-            # Create features for each pair
+            # Process relations
             for (e1_idx, e2_idx), label in zip(sample['pairs'], sample['labels']):
-                # Check if indices are valid
-                if e1_idx < len(entity_embeddings) and e2_idx < len(entity_embeddings):
+                if e1_idx in valid_indices and e2_idx in valid_indices:
+                    e1 = valid_indices[e1_idx]
+                    e2 = valid_indices[e2_idx]
+                    
                     feature = torch.cat([
-                        entity_embeddings[e1_idx],
-                        entity_embeddings[e2_idx], 
-                        context], dim=-1)
+                        entity_embeddings[e1],
+                        entity_embeddings[e2],
+                        sequence_output[batch_idx].mean(dim=0)  # context
+                    ], dim=-1)
                     features.append(feature)
                     labels.append(label)
                 
@@ -169,19 +175,30 @@ class NERELDataset(Dataset):
             truncation=True,
             return_offsets_mapping=True
         )
+         # Initialize all labels as 'O' (0)
+        ner_labels = [0] * len(encoding['input_ids'])
         
         # Align entities with tokens
         token_entities = []
         for entity in sample['entities']:
-            start_token = end_token = None
+            # Find token spans that overlap with entity
+            start_token = None
+            end_token = None
             for i, (start, end) in enumerate(encoding['offset_mapping']):
-                if start <= entity['start'] < end:
+                # Check if token overlaps with entity start
+                if start <= entity['start'] < end and start_token is None:
                     start_token = i
-                if start < entity['end'] <= end:
+                # Check if token overlaps with entity end
+                if start < entity['end'] <= end and end_token is None:
                     end_token = i
-                    break
             
             if start_token is not None and end_token is not None:
+                # Mark first token as B-ENTITY
+                ner_labels[start_token] = 1 if entity['type'] == 'PERSON' else 2
+                # Mark subsequent tokens as I-ENTITY
+                for i in range(start_token+1, end_token+1):
+                    ner_labels[i] = 3 if entity['type'] == 'PERSON' else 4
+                
                 token_entities.append({
                     'start': start_token,
                     'end': end_token,
