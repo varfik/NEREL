@@ -172,12 +172,24 @@ class NERELDataset(Dataset):
     
     def __getitem__(self, idx):
         sample = self.samples[idx]
+
+        print(f"\nOriginal text: {sample['text']}")
+        print(f"Original entities: {sample['entities']}")
+        print(f"Original relations: {sample['relations']}")
+        
         encoding = self.tokenizer(
             sample['text'],
             max_length=self.max_length,
             truncation=True,
             return_offsets_mapping=True
         )
+
+        # Выведем информацию о токенизации
+        print("\nTokenization info:")
+        tokens = self.tokenizer.convert_ids_to_tokens(encoding['input_ids'])
+        for i, (token, (start, end)) in enumerate(zip(tokens, encoding['offset_mapping'])):
+            print(f"{i}: {token} (chars: {start}-{end})")
+        
          # Initialize all labels as 'O' (0)
         ner_labels = [0] * len(encoding['input_ids'])
         
@@ -324,7 +336,18 @@ def train_model():
     return model, tokenizer
 
 def predict(text, model, tokenizer, device="cuda"):
-    encoding = tokenizer(text, return_tensors="pt", return_offsets_mapping=True).to(device)
+    # encoding = tokenizer(text, return_tensors="pt", return_offsets_mapping=True).to(device)
+
+    encoding = tokenizer(text, return_tensors="pt", return_offsets_mapping=True)
+    
+    # Выведем информацию о токенизации
+    print("\nTokenization for prediction:")
+    tokens = tokenizer.convert_ids_to_tokens(encoding['input_ids'][0])
+    for i, (token, (start, end)) in enumerate(zip(tokens, encoding['offset_mapping'][0])):
+        print(f"{i}: {token} (chars: {start}-{end})")
+    
+    encoding = encoding.to(device)
+
     
     with torch.no_grad():
         outputs = model(encoding['input_ids'], encoding['attention_mask'])
@@ -358,6 +381,12 @@ def predict(text, model, tokenizer, device="cuda"):
     
     if current_entity:
         entities.append(current_entity)
+
+    # Выведем информацию о найденных сущностях
+    print("\nPredicted entities:")
+    for e in entities:
+        entity_tokens = [tokens[i] for i in e['token_ids']]
+        print(f"{e['type']}: {' '.join(entity_tokens)} (tokens {e['start']}-{e['end']}) -> {e['text']}")
     
     # Extract relations
     relations = []
