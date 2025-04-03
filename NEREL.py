@@ -351,7 +351,7 @@ def print_entities_details(entities, tokens):
         original_text = ' '.join(entity_tokens).replace(' ##', '')
         
         print(f"{e['type']}:")
-        print(f"  Tokens: {' '.join([tokens[i] for i in e['token_ids']})")
+        print(f"  Tokens: {' '.join([tokens[i] for i in e['token_ids'])}")
         print(f"  Token IDs: {e['start']}-{e['end']}")
         print(f"  Reconstructed text: '{original_text}'")
         print(f"  Raw text in dict: '{e['text']}'")
