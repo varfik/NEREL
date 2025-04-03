@@ -11,8 +11,12 @@ from collections import defaultdict
 class NERRelationModel(nn.Module):
     def __init__(self, model_name="DeepPavlov/rubert-base-cased", num_ner_labels=5, num_rel_labels=3):
         super().__init__()
+
+        self.num_ner_labels = num_ner_labels 
+        self.num_rel_labels = num_rel_labels 
+        
         self.bert = AutoModel.from_pretrained(model_name)
-        self.config = AutoConfig.from_pretrained(model_name)
+        # self.config = AutoConfig.from_pretrained(model_name)
         
         # Enhanced NER Head
         self.ner_classifier = nn.Sequential(
@@ -43,7 +47,7 @@ class NERRelationModel(nn.Module):
             loss_fct = nn.CrossEntropyLoss(ignore_index=0)
             active_loss = attention_mask.view(-1) == 1
             ner_loss = loss_fct(
-                ner_logits.view(-1, self.ner_classifier.out_features)[active_loss],
+                ner_logits.view(-1, self.num_ner_labels)[active_loss],
                 ner_labels.view(-1)[active_loss]
             )
             total_loss += ner_loss
@@ -51,14 +55,15 @@ class NERRelationModel(nn.Module):
         # Relation processing
         if rel_data and any(len(sample['pairs']) > 0 for sample in rel_data):
             rel_features, rel_labels = self._prepare_relation_features(sequence_output, rel_data)
-            rel_logits = self.rel_classifier(rel_features)
-            
-            if len(rel_labels) > 0:
-                rel_loss = nn.CrossEntropyLoss()(
-                    rel_logits, 
-                    torch.tensor(rel_labels, device=input_ids.device)
-                )
-                total_loss += rel_loss
+            if rel_features is not None:
+                rel_logits = self.rel_classifier(rel_features)
+                
+                if rel_labels:
+                    rel_loss = nn.CrossEntropyLoss()(
+                        rel_logits, 
+                        torch.tensor(rel_labels, device=input_ids.device)
+                    )
+                    total_loss += rel_loss
 
         return {
             'ner_logits': ner_logits,
