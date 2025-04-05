@@ -465,7 +465,7 @@ def predict(text, model, tokenizer, device="cuda"):
 if __name__ == "__main__":
     model, tokenizer = train_model()
     
-    text = "Айрат Мурзагалиев, заместитель начальника управления президента РФ, встретился с главой администрации Уфы."
+    text = "Глава департамента ЦБ РФ Надежда Иванова получила статус зампреда."
     result = predict(text, model, tokenizer)
     
     print("\nEntities:")
