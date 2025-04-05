@@ -213,7 +213,7 @@ class NERELDataset(Dataset):
             start_token = end_token = None
             for i, (start, end) in enumerate(encoding['offset_mapping']):
                 # Check if token overlaps with entity start
-                if start <= entity['start'] < end and start_token is None:
+                if entity['start'] < end and entity['end'] > start:
                     start_token = i
                 # Check if token overlaps with entity end
                 if start < entity['end'] <= end and end_token is None:
