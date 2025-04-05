@@ -288,6 +288,10 @@ def train_model():
     
     optimizer = AdamW(model.parameters(), lr=5e-5)
 
+    # В функции обучения добавьте веса классов
+    relation_weights = torch.tensor([1.0, 1.0, 0.1])  # Уменьшите вес для NO_RELATION
+    rel_loss_fct = nn.CrossEntropyLoss(weight=relation_weights)
+
     sample = train_dataset[0]
     print("\nSample check:")
     print(f"Input IDs: {sample['input_ids']}")
@@ -385,59 +389,61 @@ def predict(text, model, tokenizer, device="cuda"):
     
     for i, (token, pred) in enumerate(zip(tokens, ner_preds)):
         if token in ['[CLS]', '[SEP]', '[PAD]']:
-            continue
-
-        # Определяем тип сущности и является ли она началом
-        if pred == 1:  # B-PER
-            entity_type = "PERSON"
-            is_beginning = True
-        elif pred == 2:  # I-PER
-            entity_type = "PERSON"
-            is_beginning = False
-        elif pred == 3:  # B-PROF
-            entity_type = "PROFESSION"
-            is_beginning = True
-        elif pred == 4:  # I-PROF
-            entity_type = "PROFESSION"
-            is_beginning = False
-        else:  # O
             if current_entity:
                 entities.append(current_entity)
                 current_entity = None
             continue
-        
-        # Обработка сущностей
-        if current_entity is None:
-            if is_beginning:
-                current_entity = {
-                    'type': entity_type,
-                    'start': i,
-                    'end': i,
-                    'token_ids': [i],
-                    'text': token.replace('##', '')
-                }
-        else:
-            if current_entity['type'] == entity_type and not is_beginning:
+            
+        # Определяем тип сущности и является ли она началом
+        if pred == 1:  # B-PER
+            if current_entity:
+                entities.append(current_entity)
+            current_entity = {
+                'type': "PERSON",
+                'start': i,
+                'end': i,
+                'token_ids': [i],
+                'text': token.replace('##', '')
+            }
+        elif pred == 2:  # I-PER
+            if current_entity and current_entity['type'] == "PERSON":
+                if token.startswith('##'):
+                    current_entity['text'] += token[2:]
+                else:
+                    current_entity['text'] += ' ' + token
                 current_entity['end'] = i
                 current_entity['token_ids'].append(i)
-                current_entity['text'] += token.replace('##', '')
-            else:
+        elif pred == 3:  # B-PROF
+            if current_entity:
+                entities.append(current_entity)
+            current_entity = {
+                'type': "PROFESSION",
+                'start': i,
+                'end': i,
+                'token_ids': [i],
+                'text': token.replace('##', '')
+            }
+        elif pred == 4:  # I-PROF
+            if current_entity and current_entity['type'] == "PROFESSION":
+                if token.startswith('##'):
+                    current_entity['text'] += token[2:]
+                else:
+                    current_entity['text'] += ' ' + token
+                current_entity['end'] = i
+                current_entity['token_ids'].append(i)
+        else:  # O
+            if current_entity:
                 entities.append(current_entity)
                 current_entity = None
-                if is_beginning:
-                    current_entity = {
-                        'type': entity_type,
-                        'start': i,
-                        'end': i,
-                        'token_ids': [i],
-                        'text': token.replace('##', '')
-                    }
     
     if current_entity:
         entities.append(current_entity)
 
      # Фильтрация сущностей - удаляем слишком короткие
-    entities = [e for e in entities if len(e['token_ids']) > 1 or e['type'] == 'PERSON']
+    # В функции predict после выделения сущностей:
+    entities = [e for e in entities if 
+               (e['type'] == 'PERSON' and len(e['token_ids']) >= 1) or 
+               (e['type'] == 'PROFESSION' and len(e['token_ids']) >= 2)]
     
     # Восстановление оригинального текста сущностей
     offset_mapping = encoding['offset_mapping'][0].cpu().numpy()
@@ -457,13 +463,16 @@ def predict(text, model, tokenizer, device="cuda"):
             encoding['attention_mask']
         ).last_hidden_state
         
-        # Создаем пары только между PERSON и PROFESSION
-        person_entities = [e for e in entities if e['type'] == 'PERSON']
-        prof_entities = [e for e in entities if e['type'] == 'PROFESSION']
         
         for person in person_entities:
             for prof in prof_entities:
                 # Получаем эмбеддинги
+                # Проверяем, что профессия идет после личности в тексте
+                if person['start'] < prof['start']:
+                    # Только тогда создаем отношение
+                    # Создаем пары только между PERSON и PROFESSION
+                    person_entities = [e for e in entities if e['type'] == 'PERSON']
+                    prof_entities = [e for e in entities if e['type'] == 'PROFESSION']
                 e1_embed = sequence_output[0, person['start']:person['end']+1].mean(dim=0)
                 e2_embed = sequence_output[0, prof['start']:prof['end']+1].mean(dim=0)
                 context = sequence_output.mean(dim=1)
@@ -474,14 +483,17 @@ def predict(text, model, tokenizer, device="cuda"):
                     rel_prob = torch.softmax(model.rel_classifier(feature.unsqueeze(0)), dim=-1)[0]
                     pred_label = rel_prob.argmax().item()
                     confidence = rel_prob.max().item()
-                
-                if pred_label != 2 and confidence > 0.7:  # Более высокий порог уверенности
-                    relations.append({
-                        'type': "WORKS_AS" if pred_label == 0 else "WORKPLACE",
-                        'arg1': person,
-                        'arg2': prof,
-                        'confidence': confidence
-                    })
+
+                if pred_label != 2 and confidence > 0.7:
+                    # Проверяем расстояние между сущностями
+                    distance = prof['start'] - person['end']
+                    if distance < 10:  # Максимальное расстояние в токенах
+                        relations.append({
+                            'type': "WORKS_AS" if pred_label == 0 else "WORKPLACE",
+                            'arg1': person,
+                            'arg2': prof,
+                            'confidence': confidence
+                        })
 
     # Вывод информации об отношениях
     print("\nPredicted relations:")
