@@ -8,6 +8,7 @@ import os
 import json
 from collections import defaultdict
 
+
 class NERRelationModel(nn.Module):
     def __init__(self, model_name="DeepPavlov/rubert-base-cased", num_ner_labels=5, num_rel_labels=3):
         super().__init__()
