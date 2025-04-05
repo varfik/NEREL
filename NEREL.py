@@ -85,22 +85,37 @@ class NERRelationModel(nn.Module):
                 
             # Create entity embeddings only for valid entities
             entity_embeddings = []
+            positions = []
+            seq_len = sequence_output.size(1)
             for e in valid_entities:
-                # Ensure we don't go beyond sequence length
-                start = min(e['start'], sequence_output.size(1)-1)
-                end = min(e['end'], sequence_output.size(1)-1)
+                start = min(e['start'], seq_len-1)
+                end = min(e['end'], seq_len-1)
                 entity_embed = sequence_output[batch_idx, start:end+1].mean(dim=0)
                 entity_embeddings.append(entity_embed)
+                            
+                # Add positional features (normalized positions)
+                pos1 = start / seq_len
+                pos2 = end / seq_len
+                positions.append(torch.tensor([pos1, pos2], device=sequence_output.device))
 
             # Process relations - use direct indices since we've filtered entities
             for (e1_idx, e2_idx), label in zip(sample['pairs'], sample['labels']):
                 # Check if indices are within bounds of our valid entities
                 if e1_idx < len(valid_entities) and e2_idx < len(valid_entities):
+                     # Include positional info
+                    pos_feature = torch.cat([
+                        positions[e1_idx],
+                        positions[e2_idx],
+                        torch.abs(positions[e1_idx] - positions[e2_idx])
+                    ])
+                    
                     feature = torch.cat([
                         entity_embeddings[e1_idx],
                         entity_embeddings[e2_idx],
-                        sequence_output[batch_idx].mean(dim=0)  # context
+                        sequence_output[batch_idx].mean(dim=0),
+                        pos_feature
                     ], dim=-1)
+                    
                     features.append(feature)
                     labels.append(label)
         
@@ -440,10 +455,11 @@ def predict(text, model, tokenizer, device="cuda"):
         entities.append(current_entity)
 
      # Фильтрация сущностей - удаляем слишком короткие
-    # В функции predict после выделения сущностей:
     entities = [e for e in entities if 
-               (e['type'] == 'PERSON' and len(e['token_ids']) >= 1) or 
-               (e['type'] == 'PROFESSION' and len(e['token_ids']) >= 2)]
+           (e['type'] == 'PERSON' and len(e['token_ids']) >= 1 and 
+            not any(t in e['text'].lower() for t in ['.', ',', ';'])) or 
+           (e['type'] == 'PROFESSION' and len(e['token_ids']) >= 1 and
+            not any(t in e['text'].lower() for t in ['.', ',', ';']))]
     
     # Восстановление оригинального текста сущностей
     offset_mapping = encoding['offset_mapping'][0].cpu().numpy()
@@ -457,41 +473,52 @@ def predict(text, model, tokenizer, device="cuda"):
     
     # Извлечение отношений
     relations = []
+    
     if len(entities) >= 2:
-        # Инициализируем списки для PERSON и PROFESSION
-        person_entities = [e for e in entities if e['type'] == 'PERSON' and (e['end'] - e['start']) >= 1]
-        prof_entities = [e for e in entities if e['type'] == 'PROFESSION' and (e['end'] - e['start']) >= 1]
-
-        if person_entities and prof_entities:
-            sequence_output = model.bert(
-                encoding['input_ids'], 
-                encoding['attention_mask']
-            ).last_hidden_state
+        sequence_output = model.bert(
+            encoding['input_ids'], 
+            encoding['attention_mask']
+        ).last_hidden_state
         
-            # Создаем пары только между PERSON и PROFESSION
-            for person in person_entities:
-                for prof in prof_entities:
-                    # Получаем эмбеддинги для сущностей
-                    e1_embed = sequence_output[0, person['start']:person['end']+1].mean(dim=0)
-                    e2_embed = sequence_output[0, prof['start']:prof['end']+1].mean(dim=0)
-                    context = sequence_output.mean(dim=1)
+        # Create entity embeddings
+        entity_embeddings = []
+        for entity in entities:
+            embed = sequence_output[0, entity['start']:entity['end']+1].mean(dim=0)
+            entity_embeddings.append(embed)
+        
+        # Only consider PERSON-PROFESSION pairs that are close in text
+        for i, e1 in enumerate(entities):
+            for j, e2 in enumerate(entities):
+                if i != j and ((e1['type'] == 'PERSON' and e2['type'] == 'PROFESSION') or 
+                              (e1['type'] == 'PERSON' and e2['type'] == 'PERSON')):
                     
-                    feature = torch.cat([e1_embed, e2_embed, context[0]], dim=-1)
+                    # Check proximity - max 10 tokens apart
+                    distance = abs(e1['start'] - e2['start'])
+                    if distance > 10:
+                        continue
+                        
+                    feature = torch.cat([
+                        entity_embeddings[i],
+                        entity_embeddings[j],
+                        sequence_output.mean(dim=1)[0]  # context
+                    ], dim=-1)
                     
                     with torch.no_grad():
                         rel_prob = torch.softmax(model.rel_classifier(feature.unsqueeze(0)), dim=-1)[0]
                         pred_label = rel_prob.argmax().item()
                         confidence = rel_prob.max().item()
                     
-                    # Добавляем только осмысленные отношения с достаточной уверенностью
-                    if pred_label != 2 and confidence > 0.7:  # Не 'NO_RELATION' и уверенность > 70%
-                        relations.append({
-                            'type': "WORKS_AS" if pred_label == 0 else "WORKPLACE",
-                            'arg1': person,
-                            'arg2': prof,
-                            'confidence': confidence
-                        })
-
+                    # Only add if high confidence and meaningful relation
+                    if confidence > 0.85:  # Higher threshold
+                        rel_type = "WORKS_AS" if pred_label == 0 else "WORKPLACE" if pred_label == 1 else None
+                        if rel_type:
+                            relations.append({
+                                'type': rel_type,
+                                'arg1': e1,
+                                'arg2': e2,
+                                'confidence': confidence
+                            })
+    
     # Вывод информации об отношениях
     print("\nPredicted relations:")
     for r in relations:
