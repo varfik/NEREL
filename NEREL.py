@@ -16,11 +16,11 @@ class NERRelationModel(nn.Module):
         self.num_rel_labels = num_rel_labels 
         
         self.bert = AutoModel.from_pretrained(model_name)
-        # self.config = AutoConfig.from_pretrained(model_name)
+        bert_hidden_size = self.bert.config.hidden_size
         
         # Enhanced NER Head
         self.ner_classifier = nn.Sequential(
-            nn.Linear(self.bert.config.hidden_size, 256),
+            nn.Linear(bert_hidden_size, 256),
             nn.ReLU(),
             nn.Dropout(0.3),
             nn.Linear(256, num_ner_labels)  # Now 5 classes: O, B-PER, I-PER, B-PROF, I-PROF
@@ -28,11 +28,12 @@ class NERRelationModel(nn.Module):
         
         # Relation Head remains the same
         self.rel_classifier = nn.Sequential(
-            nn.Linear(self.bert.config.hidden_size * 3, 256),
+            nn.Linear(bert_hidden_size  * 3, 256),
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(256, num_rel_labels)
         )
+        print(f"Initialized model with bert_hidden_size={bert_hidden_size}")
 
     def forward(self, input_ids, attention_mask, ner_labels=None, rel_data=None):
         outputs = self.bert(input_ids, attention_mask=attention_mask)
@@ -85,41 +86,37 @@ class NERRelationModel(nn.Module):
                 
             # Create entity embeddings only for valid entities
             entity_embeddings = []
-            positions = []
-            seq_len = sequence_output.size(1)
             for e in valid_entities:
-                start = min(e['start'], seq_len-1)
-                end = min(e['end'], seq_len-1)
+                # Ensure we don't go beyond sequence length
+                start = min(e['start'], sequence_output.size(1)-1)
+                end = min(e['end'], sequence_output.size(1)-1)
                 entity_embed = sequence_output[batch_idx, start:end+1].mean(dim=0)
                 entity_embeddings.append(entity_embed)
-                            
-                # Add positional features (normalized positions)
-                pos1 = start / seq_len
-                pos2 = end / seq_len
-                positions.append(torch.tensor([pos1, pos2], device=sequence_output.device))
-
+    
             # Process relations - use direct indices since we've filtered entities
             for (e1_idx, e2_idx), label in zip(sample['pairs'], sample['labels']):
                 # Check if indices are within bounds of our valid entities
                 if e1_idx < len(valid_entities) and e2_idx < len(valid_entities):
-                     # Include positional info
-                    pos_feature = torch.cat([
-                        positions[e1_idx],
-                        positions[e2_idx],
-                        torch.abs(positions[e1_idx] - positions[e2_idx])
-                    ])
+                    # Get the embeddings for this pair
+                    e1_embed = entity_embeddings[e1_idx]
+                    e2_embed = entity_embeddings[e2_idx]
+                    context = sequence_output[batch_idx].mean(dim=0)
                     
-                    feature = torch.cat([
-                        entity_embeddings[e1_idx],
-                        entity_embeddings[e2_idx],
-                        sequence_output[batch_idx].mean(dim=0),
-                        pos_feature
-                    ], dim=-1)
+                    # Concatenate features
+                    feature = torch.cat([e1_embed, e2_embed, context], dim=-1)
+                    
+                    # Check feature size matches classifier input
+                    expected_size = self.bert.config.hidden_size * 3
+                    if feature.size(0) != expected_size:
+                        print(f"Warning: Feature size mismatch. Expected {expected_size}, got {feature.size(0)}")
+                        continue
                     
                     features.append(feature)
                     labels.append(label)
         
-        return torch.stack(features) if features else None, labels
+        if features:
+            return torch.stack(features), labels
+        return None, labels
 
 class NERELDataset(Dataset):
     def __init__(self, data_dir, tokenizer, max_length=512):
@@ -387,9 +384,9 @@ def predict(text, model, tokenizer, device="cuda"):
     encoding = tokenizer(text, return_tensors="pt", return_offsets_mapping=True)
     tokens = tokenizer.convert_ids_to_tokens(encoding['input_ids'][0])
     
-    print("\nTokenization details:")
-    for i, (token, (start, end)) in enumerate(zip(tokens, encoding['offset_mapping'][0])):
-        print(f"{i:3d}: {token:15s} (chars: {start:3d}-{end:3d}) -> '{text[start:end]}'")
+    # print("\nTokenization details:")
+    # for i, (token, (start, end)) in enumerate(zip(tokens, encoding['offset_mapping'][0])):
+    #     print(f"{i:3d}: {token:15s} (chars: {start:3d}-{end:3d}) -> '{text[start:end]}'")
     
     encoding = {k: v.to(device) for k, v in encoding.items()}
     
