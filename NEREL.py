@@ -287,6 +287,13 @@ def train_model():
     train_loader = DataLoader(train_dataset, batch_size=4, collate_fn=collate_fn, shuffle=True)
     
     optimizer = AdamW(model.parameters(), lr=5e-5)
+
+    sample = train_dataset[0]
+    print("\nSample check:")
+    print(f"Input IDs: {sample['input_ids']}")
+    print(f"NER labels: {sample['ner_labels']}")
+    print(f"Relation pairs: {sample['rel_data']['pairs']}")
+    print(f"Relation labels: {sample['rel_data']['labels']}")
     
     for epoch in range(3):
         model.train()
@@ -379,21 +386,29 @@ def predict(text, model, tokenizer, device="cuda"):
     for i, (token, pred) in enumerate(zip(tokens, ner_preds)):
         if token in ['[CLS]', '[SEP]', '[PAD]']:
             continue
-            
-        entity_type = None
-        if pred == 1: entity_type = "PERSON"  # B-PER
-        elif pred == 2: entity_type = "PERSON"  # I-PER
-        elif pred == 3: entity_type = "PROFESSION"  # B-PROF
-        elif pred == 4: entity_type = "PROFESSION"  # I-PROF
-        
-        if entity_type:
-            is_beginning = pred in [1, 3]  # B-PER or B-PROF
-            
-            if current_entity and (current_entity['type'] != entity_type or is_beginning):
+
+        # Определяем тип сущности и является ли она началом
+        if pred == 1:  # B-PER
+            entity_type = "PERSON"
+            is_beginning = True
+        elif pred == 2:  # I-PER
+            entity_type = "PERSON"
+            is_beginning = False
+        elif pred == 3:  # B-PROF
+            entity_type = "PROFESSION"
+            is_beginning = True
+        elif pred == 4:  # I-PROF
+            entity_type = "PROFESSION"
+            is_beginning = False
+        else:  # O
+            if current_entity:
                 entities.append(current_entity)
                 current_entity = None
-                
-            if current_entity is None:
+            continue
+        
+        # Обработка сущностей
+        if current_entity is None:
+            if is_beginning:
                 current_entity = {
                     'type': entity_type,
                     'start': i,
@@ -401,52 +416,73 @@ def predict(text, model, tokenizer, device="cuda"):
                     'token_ids': [i],
                     'text': token.replace('##', '')
                 }
-            else:
+        else:
+            if current_entity['type'] == entity_type and not is_beginning:
                 current_entity['end'] = i
                 current_entity['token_ids'].append(i)
                 current_entity['text'] += token.replace('##', '')
+            else:
+                entities.append(current_entity)
+                current_entity = None
+                if is_beginning:
+                    current_entity = {
+                        'type': entity_type,
+                        'start': i,
+                        'end': i,
+                        'token_ids': [i],
+                        'text': token.replace('##', '')
+                    }
     
     if current_entity:
         entities.append(current_entity)
+
+     # Фильтрация сущностей - удаляем слишком короткие
+    entities = [e for e in entities if len(e['token_ids']) > 1 or e['type'] == 'PERSON']
     
+    # Восстановление оригинального текста сущностей
+    offset_mapping = encoding['offset_mapping'][0].cpu().numpy()
+    for entity in entities:
+        start_char = offset_mapping[entity['start']][0]
+        end_char = offset_mapping[entity['end']][1]
+        entity['text'] = text[start_char:end_char]
+
     # Вывод подробной информации о сущностях
     print_entities_details(entities, tokens)
     
     # Извлечение отношений
     relations = []
-    if len(entities) >= 2 and outputs['rel_logits'] is not None:
+    if len(entities) >= 2:
         sequence_output = model.bert(
             encoding['input_ids'], 
             encoding['attention_mask']
         ).last_hidden_state
         
-        # Создаем все возможные пары сущностей
-        pairs = [(i, j) for i in range(len(entities)) for j in range(len(entities)) if i != j]
+        # Создаем пары только между PERSON и PROFESSION
+        person_entities = [e for e in entities if e['type'] == 'PERSON']
+        prof_entities = [e for e in entities if e['type'] == 'PROFESSION']
         
-        for i, j in pairs:
-            # Получаем эмбеддинги для сущностей
-            e1_start, e1_end = entities[i]['start'], entities[i]['end']
-            e2_start, e2_end = entities[j]['start'], entities[j]['end']
-            
-            e1_embed = sequence_output[0, e1_start:e1_end+1].mean(dim=0)
-            e2_embed = sequence_output[0, e2_start:e2_end+1].mean(dim=0)
-            context = sequence_output.mean(dim=1)
-            
-            feature = torch.cat([e1_embed, e2_embed, context[0]], dim=-1)
-            
-            with torch.no_grad():
-                rel_prob = torch.softmax(model.rel_classifier(feature.unsqueeze(0)), dim=-1)[0]
-                pred_label = rel_prob.argmax().item()
-                confidence = rel_prob.max().item()
-            
-            if pred_label != 2 and confidence > 0.5:  # Не 'NO_RELATION' и уверенность > 50%
-                relations.append({
-                    'type': "WORKS_AS" if pred_label == 0 else "WORKPLACE",
-                    'arg1': entities[i],
-                    'arg2': entities[j],
-                    'confidence': confidence
-                })
-    
+        for person in person_entities:
+            for prof in prof_entities:
+                # Получаем эмбеддинги
+                e1_embed = sequence_output[0, person['start']:person['end']+1].mean(dim=0)
+                e2_embed = sequence_output[0, prof['start']:prof['end']+1].mean(dim=0)
+                context = sequence_output.mean(dim=1)
+                
+                feature = torch.cat([e1_embed, e2_embed, context[0]], dim=-1)
+                
+                with torch.no_grad():
+                    rel_prob = torch.softmax(model.rel_classifier(feature.unsqueeze(0)), dim=-1)[0]
+                    pred_label = rel_prob.argmax().item()
+                    confidence = rel_prob.max().item()
+                
+                if pred_label != 2 and confidence > 0.7:  # Более высокий порог уверенности
+                    relations.append({
+                        'type': "WORKS_AS" if pred_label == 0 else "WORKPLACE",
+                        'arg1': person,
+                        'arg2': prof,
+                        'confidence': confidence
+                    })
+
     # Вывод информации об отношениях
     print("\nPredicted relations:")
     for r in relations:
