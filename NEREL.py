@@ -458,36 +458,33 @@ def predict(text, model, tokenizer, device="cuda"):
     # Извлечение отношений
     relations = []
     if len(entities) >= 2:
-        sequence_output = model.bert(
-            encoding['input_ids'], 
-            encoding['attention_mask']
-        ).last_hidden_state
-        
-        
-        for person in person_entities:
-            for prof in prof_entities:
-                # Получаем эмбеддинги
-                # Проверяем, что профессия идет после личности в тексте
-                if person['start'] < prof['start']:
-                    # Только тогда создаем отношение
-                    # Создаем пары только между PERSON и PROFESSION
-                    person_entities = [e for e in entities if e['type'] == 'PERSON']
-                    prof_entities = [e for e in entities if e['type'] == 'PROFESSION']
-                e1_embed = sequence_output[0, person['start']:person['end']+1].mean(dim=0)
-                e2_embed = sequence_output[0, prof['start']:prof['end']+1].mean(dim=0)
-                context = sequence_output.mean(dim=1)
-                
-                feature = torch.cat([e1_embed, e2_embed, context[0]], dim=-1)
-                
-                with torch.no_grad():
-                    rel_prob = torch.softmax(model.rel_classifier(feature.unsqueeze(0)), dim=-1)[0]
-                    pred_label = rel_prob.argmax().item()
-                    confidence = rel_prob.max().item()
+        # Инициализируем списки для PERSON и PROFESSION
+        person_entities = [e for e in entities if e['type'] == 'PERSON' and (e['end'] - e['start']) >= 1]
+        prof_entities = [e for e in entities if e['type'] == 'PROFESSION' and (e['end'] - e['start']) >= 1]
 
-                if pred_label != 2 and confidence > 0.7:
-                    # Проверяем расстояние между сущностями
-                    distance = prof['start'] - person['end']
-                    if distance < 10:  # Максимальное расстояние в токенах
+        if person_entities and prof_entities:
+            sequence_output = model.bert(
+                encoding['input_ids'], 
+                encoding['attention_mask']
+            ).last_hidden_state
+        
+            # Создаем пары только между PERSON и PROFESSION
+            for person in person_entities:
+                for prof in prof_entities:
+                    # Получаем эмбеддинги для сущностей
+                    e1_embed = sequence_output[0, person['start']:person['end']+1].mean(dim=0)
+                    e2_embed = sequence_output[0, prof['start']:prof['end']+1].mean(dim=0)
+                    context = sequence_output.mean(dim=1)
+                    
+                    feature = torch.cat([e1_embed, e2_embed, context[0]], dim=-1)
+                    
+                    with torch.no_grad():
+                        rel_prob = torch.softmax(model.rel_classifier(feature.unsqueeze(0)), dim=-1)[0]
+                        pred_label = rel_prob.argmax().item()
+                        confidence = rel_prob.max().item()
+                    
+                    # Добавляем только осмысленные отношения с достаточной уверенностью
+                    if pred_label != 2 and confidence > 0.7:  # Не 'NO_RELATION' и уверенность > 70%
                         relations.append({
                             'type': "WORKS_AS" if pred_label == 0 else "WORKPLACE",
                             'arg1': person,
