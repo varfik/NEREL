@@ -29,9 +29,14 @@ class NERRelationModel(nn.Module):
         
         # Relation Head remains the same
         self.rel_classifier = nn.Sequential(
-            nn.Linear(bert_hidden_size  * 3, 256),
+            nn.Linear(bert_hidden_size * 3, 512),
             nn.ReLU(),
-            nn.Dropout(0.1),
+            nn.Dropout(0.3),
+            nn.LayerNorm(512),
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.LayerNorm(256),
             nn.Linear(256, num_rel_labels)
         )
         print(f"Initialized model with bert_hidden_size={bert_hidden_size}")
@@ -302,7 +307,7 @@ def train_model():
     optimizer = AdamW(model.parameters(), lr=5e-5)
 
     # В функции обучения добавьте веса классов
-    relation_weights = torch.tensor([1.0, 1.0, 0.1])  # Уменьшите вес для NO_RELATION
+    relation_weights = torch.tensor([1.0, 2.0, 0.5])  # Уменьшите вес для NO_RELATION
     rel_loss_fct = nn.CrossEntropyLoss(weight=relation_weights)
 
     sample = train_dataset[0]
@@ -502,20 +507,25 @@ def predict(text, model, tokenizer, device="cuda"):
                     ], dim=-1)
                     
                     with torch.no_grad():
-                        rel_prob = torch.softmax(model.rel_classifier(feature.unsqueeze(0)), dim=-1)[0]
-                        pred_label = rel_prob.argmax().item()
-                        confidence = rel_prob.max().item()
+                        rel_logits = model.rel_classifier(feature.unsqueeze(0))
+                        rel_probs = torch.softmax(rel_logits, dim=-1)[0]
                     
-                    # Only add if high confidence and meaningful relation
-                    if confidence > 0.85:  # Higher threshold
-                        rel_type = "WORKS_AS" if pred_label == 0 else "WORKPLACE" if pred_label == 1 else None
-                        if rel_type:
-                            relations.append({
-                                'type': rel_type,
-                                'arg1': e1,
-                                'arg2': e2,
-                                'confidence': confidence
-                            })
+                    # Добавьте логику для разных типов отношений
+                    if e2['type'] == 'PROFESSION':
+                        pred_label = 0  # WORKS_AS
+                        confidence = rel_probs[0].item()
+                    else:
+                        pred_label = 1  # WORKPLACE
+                        confidence = rel_probs[1].item()
+                    
+                    if confidence > 0.7:  # Настроенный порог
+                        rel_type = "WORKS_AS" if pred_label == 0 else "WORKPLACE"
+                        relations.append({
+                            'type': rel_type,
+                            'arg1': e1,
+                            'arg2': e2,
+                            'confidence': confidence
+                        })
     
     # Вывод информации об отношениях
     print("\nPredicted relations:")
