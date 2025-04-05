@@ -152,7 +152,6 @@ class NERELDataset(Dataset):
                         entity_map[entity_id] = entity
                 
                 elif line.startswith('R'):
-                    print("HEREEEEEEEEEEEEEEEEE")
                     parts = line.strip().split('\t')
                     rel_type, arg1, arg2 = parts[1].split()
                     arg1 = arg1.split(':')[1]
@@ -465,13 +464,15 @@ def predict(text, model, tokenizer, device="cuda"):
 if __name__ == "__main__":
     model, tokenizer = train_model()
     
-    text = "Глава департамента ЦБ РФ Надежда Иванова получила статус зампреда."
-    result = predict(text, model, tokenizer)
+    test_texts = [
+        "Айрат Мурзагалиев, заместитель начальника управления президента РФ, встретился с главой администрации Уфы.",
+        "Иван Петров работает программистом в компании Яндекс.",
+        "Доктор Сидоров принял пациентку Ковалеву в городской больнице."
+    ]
     
-    print("\nEntities:")
-    for e in result['entities']:
-        print(f"{e['type']}: {e['text']}")
-    
-    print("\nRelations:")
-    for r in result['relations']:
-        print(f"{r['type']}: {r['arg1']['text']} -> {r['arg2']['text']} (conf: {r['confidence']:.2f})")
+    for text in test_texts:
+        print("\n" + "="*80)
+        print(f"Processing text: '{text}'")
+        result = predict(text, model, tokenizer)
+        print("\nFinal result:")
+        print(json.dumps(result, indent=2, ensure_ascii=False))
