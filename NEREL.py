@@ -299,7 +299,7 @@ def train_model():
     print(f"Relation pairs: {sample['rel_data']['pairs']}")
     print(f"Relation labels: {sample['rel_data']['labels']}")
     
-    for epoch in range(3):
+    for epoch in range(2):
         model.train()
         epoch_loss = ner_correct = ner_total = rel_correct = rel_total = 0
         
